@@ -1,15 +1,22 @@
-"""XShield: Explainable ML-assisted Detection for Suspicious Encrypted Network Traffic.
+"""XShield: Explainable ML-Assisted Traffic Intelligence & Live Threat Monitoring Prototype.
 
-Operational Inference & Triage Dashboard (Phase 2)
-Integrates saved model inference, schema validation, triage workflows,
-and baseline research evaluation.
+Phase 4 Live Demonstration & Operational Dashboard
+- Live Network Capture (with Npcap autodetection) & Deterministic Replay Engine
+- Bidirectional Flow Aggregation & TLS Handshake Metadata Extraction (without payload decryption)
+- Schema-Safe Detection Engine with Evidence Reasoning & Uncalibrated Ensemble Scores
+- Persistent Incident Management (SQLite) & Cooldown Deduplication
+- Controlled Network Response (Simulation Mode by default, Optional Guarded Windows Firewall & Rollback)
+- Historical Analysis, System Diagnostics, and Offline CSV Triage
 """
 
-from datetime import datetime, timezone
+from collections import deque
+import datetime
 from io import StringIO
 import json
+import os
 from pathlib import Path
-from typing import Optional
+import time
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,7 +24,27 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+# Core XShield Modules
+from xshield.alerts.alert_manager import AlertManager, AlertNotification
+from xshield.detection.engine import DetectionEngine, DetectionPolicy, DetectionVerdict
+from xshield.flows.aggregator import FlowAggregator
+from xshield.flows.flow_record import FlowRecord
+from xshield.flows.replay import FlowReplayEngine
+from xshield.monitoring.capture import (
+    CaptureBackendStatus,
+    LiveCaptureWorker,
+    check_capture_health,
+    check_is_admin,
+    check_npcap_installed,
+    get_available_interfaces,
+)
 from xshield.pipeline import MODELS_DIR, XShieldModel, load_model, run_experiment
+from xshield.response.blocker import (
+    BlockActionStatus,
+    NetworkResponseManager,
+    is_protected_ip,
+)
+from xshield.storage.incident_store import IncidentRecord, IncidentStore
 from xshield.triage import (
     assess_dataset_compatibility,
     check_model_compatibility,
@@ -30,22 +57,22 @@ from xshield.triage import (
     validate_flow_schema,
 )
 
-# Page configuration
+# -----------------------------------------------------------------------------
+# Page Configuration & Styling
+# -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="XShield | Traffic Intelligence & Triage",
+    page_title="XShield | Live Network Threat Monitoring",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom Cyber-Intelligence Dark Styling
 st.markdown("""
 <style>
     .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
     [data-testid="stAppViewContainer"] { background: #0b1220; color: #e2e8f0; }
     [data-testid="stSidebar"] { background: #0f172a; border-right: 1px solid #1e293b; }
     
-    /* Sleek card containers */
     .metric-card {
         background: #111c2e;
         border: 1px solid #1e293b;
@@ -73,756 +100,624 @@ st.markdown("""
         margin-top: 2px;
     }
     
-    /* Integrity banner */
-    .integrity-banner {
-        background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%);
-        border-left: 4px solid #38bdf8;
+    .status-banner {
         border-radius: 6px;
-        padding: 12px 18px;
-        margin-bottom: 20px;
+        padding: 10px 16px;
+        margin-bottom: 15px;
         font-size: 0.88rem;
-        color: #cbd5e1;
-        line-height: 1.5;
+        line-height: 1.4;
     }
-    .integrity-badge {
-        font-weight: 700;
-        color: #38bdf8;
-        letter-spacing: 0.03em;
+    .banner-simulation {
+        background: rgba(30, 58, 138, 0.3);
+        border-left: 4px solid #3b82f6;
+        color: #bfdbfe;
+    }
+    .banner-warning {
+        background: rgba(180, 83, 9, 0.25);
+        border-left: 4px solid #f59e0b;
+        color: #fde68a;
+    }
+    .banner-experimental {
+        background: rgba(88, 28, 135, 0.3);
+        border-left: 4px solid #a855f7;
+        color: #e9d5ff;
     }
 
-    /* Risk badges */
-    .badge-low { background-color: #064e3b; color: #34d399; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem; }
-    .badge-med { background-color: #78350f; color: #fbbf24; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem; }
-    .badge-high { background-color: #7c2d12; color: #fb923c; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem; }
-    .badge-crit { background-color: #881337; color: #f43f5e; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.8rem; }
+    .badge-high { background-color: #7c2d12; color: #fb923c; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+    .badge-med { background-color: #78350f; color: #fbbf24; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+    .badge-low { background-color: #064e3b; color: #34d399; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+    .badge-info { background-color: #1e293b; color: #94a3b8; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
 </style>
 """, unsafe_allow_html=True)
 
 
-@st.cache_resource(show_spinner="Loading verified model artifact...")
-def get_cached_model(model_name: str) -> XShieldModel:
-    """Loads a verified model from disk with resource caching."""
-    return load_model(model_name)
+# -----------------------------------------------------------------------------
+# Session State Initialization (Persistent across reruns)
+# -----------------------------------------------------------------------------
+if "incident_store" not in st.session_state:
+    st.session_state.incident_store = IncidentStore()
+
+if "alert_manager" not in st.session_state:
+    st.session_state.alert_manager = AlertManager(
+        incident_store=st.session_state.incident_store,
+        cooldown_seconds=60.0,
+    )
+
+if "response_manager" not in st.session_state:
+    st.session_state.response_manager = NetworkResponseManager(simulation_mode=True)
+
+if "detection_engine" not in st.session_state:
+    st.session_state.detection_engine = DetectionEngine()
+
+if "flow_aggregator" not in st.session_state:
+    st.session_state.flow_aggregator = FlowAggregator()
+
+if "live_flows_buffer" not in st.session_state:
+    st.session_state.live_flows_buffer = deque(maxlen=60)
+
+if "replay_engine" not in st.session_state:
+    st.session_state.replay_engine = None
+
+if "selected_incident_id" not in st.session_state:
+    st.session_state.selected_incident_id = None
+
+if "quick_block_target" not in st.session_state:
+    st.session_state.quick_block_target = ""
+
+if "flow_stats_counters" not in st.session_state:
+    st.session_state.flow_stats_counters = {
+        "total": 0,
+        "suspicious": 0,
+        "benign": 0,
+        "insufficient": 0,
+    }
+
+
+def handle_incoming_flow(flow: FlowRecord) -> None:
+    """Processes a newly captured or replayed flow through detection and alerting."""
+    verdict = st.session_state.detection_engine.evaluate_flow(flow)
+    st.session_state.live_flows_buffer.appendleft({"flow": flow, "verdict": verdict})
+
+    st.session_state.flow_stats_counters["total"] += 1
+    if verdict.status == "SUSPICIOUS":
+        st.session_state.flow_stats_counters["suspicious"] += 1
+        st.session_state.alert_manager.process_verdict(flow, verdict)
+    elif verdict.status == "BENIGN":
+        st.session_state.flow_stats_counters["benign"] += 1
+    else:
+        st.session_state.flow_stats_counters["insufficient"] += 1
 
 
 # -----------------------------------------------------------------------------
-# Top Navigation & Header
+# Top Header & Environmental Status Banners
 # -----------------------------------------------------------------------------
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
     st.title("🛡️ XShield")
-    st.caption("Explainable ML-Assisted Traffic Intelligence & Operational Triage · Research Build")
+    st.caption("Explainable ML-Assisted Encrypted Traffic Intelligence · Live Monitoring & Incident Response Prototype")
 with col_h2:
-    st.markdown("<div style='text-align: right; padding-top: 15px; color: #64748b; font-size: 0.8rem;'>"
-                "XShield v2.0-rc<br>Phase 2 Operational Dashboard</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='text-align: right; padding-top: 15px; color: #64748b; font-size: 0.8rem;'>"
+        "XShield v4.0-demo<br>Live Security Demonstration</div>",
+        unsafe_allow_html=True,
+    )
 
-# Visible Risk and Research Integrity Note (Mandatory Section 6)
-st.markdown("""
-<div class="integrity-banner">
-    <span class="integrity-badge">RESEARCH INTEGRITY & RISK NOTICE:</span>
-    XShield produces ML-based suspiciousness indicators from the features available to the selected model. 
-    Predictions are not confirmed malware verdicts. Model scores are uncalibrated Random Forest class confidence scores, 
-    not calibrated probabilities unless calibration has been validated. High scores indicate statistical divergence, 
-    not proof of compromise. Low scores do not guarantee safety. Benchmark results do not imply generalization to arbitrary Internet traffic.
-</div>
-""", unsafe_allow_html=True)
+backend_status = check_capture_health()
 
-# Top-level Tabs: Operational Triage vs Research Baseline
-tab_triage, tab_research = st.tabs([
-    "🛡️ Operational Inference & Triage",
-    "🧪 Baseline Model Training & Evaluation (Phase 1)",
+# Top environmental notice banners
+if not backend_status.is_npcap_installed:
+    st.markdown("""
+    <div class="status-banner banner-warning">
+        <strong>⚠️ CAPTURE DRIVER NOTICE:</strong> Npcap driver not detected on Windows host. 
+        Live promiscuous packet sniffing requires Npcap (<a href="https://npcap.com" target="_blank" style="color:#fde68a;">npcap.com</a>) with WinPcap API compatibility. 
+        <strong>Deterministic Replay Engine</strong> is active for safe, full demonstration.
+    </div>
+    """, unsafe_allow_html=True)
+
+if st.session_state.response_manager.simulation_mode:
+    st.markdown("""
+    <div class="status-banner banner-simulation">
+        <strong>🛡️ SAFETY NOTICE — SIMULATION MODE ACTIVE:</strong> All network blocking actions are recorded for analyst triage without modifying Windows Firewall rules. 
+        Zero risk of network disruption. Optional live enforcement can be requested with administrative privileges.
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------
+# Navigation Tabs
+# -----------------------------------------------------------------------------
+tabs = st.tabs([
+    "📡 Live Monitor",
+    "🚨 Alerts & Incidents",
+    "🛡️ Network Response",
+    "📊 Historical Analysis",
+    "🩺 System Health",
+    "📁 Offline CSV Triage (Phase 2)",
+    "🧪 Model Research (Phase 1)",
 ])
 
 
 # =============================================================================
-# TAB 1: OPERATIONAL INFERENCE & TRIAGE
+# TAB 1: LIVE MONITOR
 # =============================================================================
-with tab_triage:
-    # -------------------------------------------------------------------------
-    # 1. Model Selection & Inspection
-    # -------------------------------------------------------------------------
-    manifest = load_manifest_models(MODELS_DIR)
-    
-    st.subheader("1 · Model Selection & Verification")
-    
-    if not manifest:
-        st.error(f"No models found in manifest at '{MODELS_DIR / 'manifest.json'}'. Please ensure models are trained.")
-        st.stop()
+with tabs[0]:
+    st.subheader("1 · Network Traffic Monitoring & Real-Time Ingestion")
 
-    model_options = list(manifest.keys())
-    
-    # Friendly labels for model selection
-    def format_model_label(key: str) -> str:
-        info = manifest.get(key, {})
-        ds = info.get("dataset_name", "Unknown Dataset")
-        policy = info.get("port_policy", "default").replace("_", " ").title()
-        features = info.get("feature_count", len(info.get("feature_names", [])))
-        return f"{key}  [{ds} · {policy} · {features} features]"
-
-    if "selected_model_key" not in st.session_state or st.session_state["selected_model_key"] not in model_options:
-        st.session_state["selected_model_key"] = model_options[0]
-
-    current_idx = model_options.index(st.session_state["selected_model_key"])
-
-    def on_model_select_change():
-        st.session_state["selected_model_key"] = st.session_state["model_select_dropdown"]
-
-    selected_model_key = st.selectbox(
-        "Select Saved XShield Model",
-        options=model_options,
-        format_func=format_model_label,
-        index=current_idx,
-        key="model_select_dropdown",
-        on_change=on_model_select_change,
-        help="Select a model artifact from models/manifest.json. Safe loading ensures no arbitrary code execution.",
-    )
-    st.session_state["selected_model_key"] = selected_model_key
-
-    model_meta = manifest.get(selected_model_key, {})
-    if not model_meta.get("is_available", False):
-        st.error(f"Model artifact '{selected_model_key}' is unavailable or missing companion files: "
-                 f"{model_meta.get('missing_files', [])}. Please select another model.")
-        st.stop()
-
-    try:
-        active_model = get_cached_model(selected_model_key)
-    except Exception as e:
-        st.error(f"Failed to load model '{selected_model_key}': {type(e).__name__}: {e}")
-        st.info("Please select another valid model or re-verify model artifacts.")
-        st.stop()
-
-    # Model Architecture Summary Bar
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
+    m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+    with m_c1:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">Dataset & Policy</div>
-            <div class="metric-val" style="font-size: 1.15rem;">{model_meta.get('port_policy', '').replace('_', ' ').title()}</div>
-            <div class="metric-sub">{model_meta.get('dataset_name', '')}</div>
+            <div class="metric-title">Flows Ingested</div>
+            <div class="metric-val">{st.session_state.flow_stats_counters['total']:,}</div>
+            <div class="metric-sub">Session cumulative</div>
         </div>
         """, unsafe_allow_html=True)
-    with m2:
+    with m_c2:
+        s_count = st.session_state.flow_stats_counters["suspicious"]
+        s_color = "#f43f5e" if s_count > 0 else "#34d399"
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">Required Schema</div>
-            <div class="metric-val">{len(active_model.feature_names)} <span style="font-size:0.9rem;font-weight:400;color:#94a3b8;">features</span></div>
-            <div class="metric-sub">{len(active_model.metadata.get('numeric_features', []))} numeric · {len(active_model.metadata.get('categorical_features', []))} categorical</div>
+            <div class="metric-title">Suspicious Detections</div>
+            <div class="metric-val" style="color: {s_color};">{s_count:,}</div>
+            <div class="metric-sub">Alerted & Triaged</div>
         </div>
         """, unsafe_allow_html=True)
-    with m3:
+    with m_c3:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">Classification Task</div>
-            <div class="metric-val" style="font-size: 1.15rem;">{model_meta.get('task_type', '').title()}</div>
-            <div class="metric-sub">Classes: {', '.join(active_model.classes)}</div>
+            <div class="metric-title">Benign Verified</div>
+            <div class="metric-val" style="color: #34d399;">{st.session_state.flow_stats_counters['benign']:,}</div>
+            <div class="metric-sub">Cleared by Engine</div>
         </div>
         """, unsafe_allow_html=True)
-    with m4:
-        eval_summary = model_meta.get("evaluation_summary", {})
-        f1_str = f"{eval_summary.get('macro_f1') or eval_summary.get('out_of_fold_macro_f1', 0.0):.4f}" if eval_summary else "N/A"
-        roc_str = f"{eval_summary.get('roc_auc') or eval_summary.get('out_of_fold_roc_auc', 0.0):.4f}" if eval_summary else "N/A"
+    with m_c4:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">Validation Performance</div>
-            <div class="metric-val" style="font-size: 1.15rem;">F1: {f1_str}</div>
-            <div class="metric-sub">ROC-AUC: {roc_str}</div>
+            <div class="metric-title">Insufficient Evidence</div>
+            <div class="metric-val" style="color: #94a3b8;">{st.session_state.flow_stats_counters['insufficient']:,}</div>
+            <div class="metric-sub">&lt; 4 pkts / incomplete</div>
         </div>
         """, unsafe_allow_html=True)
 
-    with st.expander("🔍 Inspect Model Feature Schema & Excluded Fields", expanded=False):
-        c_left, c_right = st.columns(2)
-        with c_left:
-            st.markdown(f"**Required Features ({len(active_model.feature_names)}):**")
-            st.write(active_model.feature_names)
-        with c_right:
-            st.markdown(f"**Excluded Leakage Guard Fields ({len(active_model.metadata.get('excluded_features', []))}):**")
-            st.write(active_model.metadata.get("excluded_features", []))
+    # Ingestion Controls
+    st.markdown("### Stream Controls")
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 1])
 
-    st.markdown("---")
-
-    # -------------------------------------------------------------------------
-    # 2. Input Ingestion & Schema Validation
-    # -------------------------------------------------------------------------
-    st.subheader("2 · Traffic Flow Ingestion (CSV)")
-    
-    # Active model context beside ingestion controls
-    st.markdown(f"""
-    <div style="background: #111c2e; border: 1px solid #1e293b; border-radius: 6px; padding: 10px 16px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-        <div>
-            <span style="color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;">Selected Target Model:</span>
-            <strong style="color: #38bdf8; margin-left: 6px; font-size: 0.95rem;">{selected_model_key}</strong>
-        </div>
-        <div style="font-size: 0.85rem; color: #cbd5e1;">
-            <span>Dataset: <strong style="color: #f8fafc;">{model_meta.get('dataset_name', '')}</strong></span>
-            <span style="color: #64748b; margin: 0 8px;">|</span>
-            <span>Port Policy: <strong style="color: #f8fafc;">{model_meta.get('port_policy', '').replace('_', ' ').title()}</strong></span>
-            <span style="color: #64748b; margin: 0 8px;">|</span>
-            <span>Required Features: <strong style="color: #f8fafc;">{len(active_model.feature_names)}</strong></span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.info("Upload an unlabelled or labelled network-flow CSV. "
-            "Raw PCAP parsing is out of scope for this phase. "
-            "If a ground-truth label column is present in the CSV, it will be preserved for reference only "
-            "and will strictly NEVER influence model predictions.")
-
-    col_up, col_samples = st.columns([3, 2])
-    with col_up:
-        uploaded_file = st.file_uploader(
-            "Upload flow records (CSV)",
-            type=["csv"],
-            key="triage_file_uploader",
-            help="Upload a CSV with network flow features matching the selected model's schema.",
-        )
-    with col_samples:
-        st.markdown("<p style='font-size:0.85rem;color:#94a3b8;margin-bottom:8px;'>Or load benchmark demonstration fixtures:</p>", unsafe_allow_html=True)
-        s_col1, s_col2 = st.columns(2)
-        with s_col1:
-            load_tqh_sample = st.button("📂 Load TQH-C2 Demo (50 flows)", width="stretch")
-        with s_col2:
-            load_cic_sample = st.button("📂 Load CICIDS Demo (50 flows)", width="stretch")
-
-    # Determine input data source
-    input_df = None
-    input_source_desc = ""
-
-    if uploaded_file is not None:
-        try:
-            # Read safe CSV
-            input_df = pd.read_csv(uploaded_file, low_memory=False)
-            input_source_desc = f"Uploaded file: {uploaded_file.name} ({len(input_df):,} rows)"
-        except Exception as e:
-            st.error(f"Malformed or unreadable CSV file: {type(e).__name__}: {e}")
-            st.stop()
-    elif load_tqh_sample:
-        tqh_sample_path = Path("data/sample_tqh_c2_unlabelled.csv")
-        if tqh_sample_path.exists():
-            input_df = pd.read_csv(tqh_sample_path)
-            input_source_desc = f"Demo Fixture: TQH-C2 Testbed A ({len(input_df)} flows)"
-        else:
-            st.warning("Demo fixture data/sample_tqh_c2_unlabelled.csv not found.")
-    elif load_cic_sample:
-        cic_sample_path = Path("data/sample_cicids2018_unlabelled.csv")
-        if cic_sample_path.exists():
-            input_df = pd.read_csv(cic_sample_path)
-            input_source_desc = f"Demo Fixture: CICIDS-2018 Botnet ({len(input_df)} flows)"
-        else:
-            st.warning("Demo fixture data/sample_cicids2018_unlabelled.csv not found.")
-
-    if input_df is None:
-        st.markdown("<div style='text-align: center; padding: 40px; color: #64748b;'>"
-                    "<i>Waiting for traffic flow CSV. Please upload a file or click a demo fixture above.</i></div>",
-                    unsafe_allow_html=True)
-        st.stop()
-
-    # Basic shape checks
-    if input_df.empty or len(input_df) == 0:
-        st.error("Uploaded CSV contains 0 rows. Please provide a non-empty CSV.")
-        st.stop()
-
-    # Dataset Diagnostics & Schema Inspection
-    diag = assess_dataset_compatibility(input_df, manifest=manifest, current_model_key=selected_model_key)
-    validation = validate_flow_schema(input_df, active_model, manifest=manifest)
-
-    st.markdown("##### Dataset Diagnostics & Schema Inspection")
-    d1, d2, d3, d4 = st.columns(4)
-    with d1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Row Count</div>
-            <div class="metric-val">{len(input_df):,} <span style="font-size:0.85rem;font-weight:400;color:#94a3b8;">flows</span></div>
-            <div class="metric-sub">{input_source_desc[:38]}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with d2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Column Count</div>
-            <div class="metric-val">{len(input_df.columns)} <span style="font-size:0.85rem;font-weight:400;color:#94a3b8;">columns</span></div>
-            <div class="metric-sub">CSV header fields</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with d3:
-        schema_color = "#34d399" if "known" in diag["schema_classification"] else ("#fbbf24" if "partial" in diag["schema_classification"] else "#f43f5e")
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Detected Schema</div>
-            <div class="metric-val" style="font-size: 1.05rem; color: {schema_color};">{diag['detected_schema']}</div>
-            <div class="metric-sub">{diag['evidence'][:42]}...</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with d4:
-        match_color = "#34d399" if validation["is_valid"] else "#f43f5e"
-        match_status = "COMPATIBLE ✅" if validation["is_valid"] else "MISMATCH ❌"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Selected Model Match</div>
-            <div class="metric-val" style="font-size: 1.05rem; color: {match_color};">{match_status}</div>
-            <div class="metric-sub">{selected_model_key}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    if not validation["is_valid"]:
-        st.error(f"❌ {validation['message']}")
-
-        # Show missing required columns and additional columns separately
-        col_m, col_e = st.columns(2)
-        with col_m:
-            st.markdown(f"**🔻 Missing Required Columns for `{selected_model_key}` ({len(validation['missing_features'])}):**")
-            st.caption("Required by the selected model's saved metadata. Features are never invented or zero-filled.")
-            st.dataframe(pd.DataFrame({"Missing Required Feature": validation["missing_features"]}), width="stretch", height=200)
-
-        with col_e:
-            st.markdown(f"**➕ Additional / Auxiliary Columns in Uploaded CSV ({len(validation['extra_features'])}):**")
-            st.caption("Preserved for inspection; strictly excluded from model feature inputs.")
-            st.dataframe(pd.DataFrame({"Auxiliary Column": validation["extra_features"]}), width="stretch", height=200)
-
-        # Cross-model compatibility catalog table
-        compat_rows = []
-        for m_key, comp_info in diag["model_compatibilities"].items():
-            compat_rows.append({
-                "Model": m_key,
-                "Benchmark Dataset": comp_info["dataset_name"],
-                "Port Policy": comp_info["port_policy"].replace("_", " ").title(),
-                "Compatible": "✅ Compatible" if comp_info["is_compatible"] else "❌ Incompatible",
-                "Schema Coverage": f"{comp_info['present_count']}/{comp_info['total_required']} ({comp_info['match_percentage']}%)",
-                "Missing Columns": len(comp_info["missing_features"]),
-            })
-
-        with st.expander("📋 View Compatibility with All Catalog Models", expanded=True):
-            st.dataframe(pd.DataFrame(compat_rows), width="stretch")
-
-        # Actionable resolution without silent modification
-        if diag["compatible_models"]:
-            rec_model = diag["recommended_model"]
-            st.warning(
-                f"💡 **Compatible Model Available:** The uploaded CSV matches **{diag['detected_schema']}** "
-                f"and is compatible with **{len(diag['compatible_models'])}** catalog model(s).\n\n"
-                f"Recommended model: **`{rec_model}`** "
-                f"({manifest[rec_model]['dataset_name']} · {manifest[rec_model]['port_policy'].replace('_', ' ').title()}).\n\n"
-                f"Click below to switch the active model selection and proceed to triage."
-            )
-            if st.button(f"👉 Switch to Compatible Model: {format_model_label(rec_model)}", width="stretch", type="primary", key="btn_switch_rec_model"):
-                st.session_state["selected_model_key"] = rec_model
-                st.rerun()
-        else:
-            st.error(
-                f"🚫 **Unsupported Dataset Schema:** The uploaded CSV does not match any existing model in the XShield catalog.\n\n"
-                f"**Why:** Current models were trained specifically on the **TQH-C2** (Sliver TLS) and "
-                f"**CICIDS-2018** (CICFlowMeter flow statistics) benchmark schemas. Arbitrary network-flow formats "
-                f"are not supported without training a dedicated model."
-            )
-
-        st.stop()
-    else:
-        status_extra = f" (+ {len(validation['extra_features'])} auxiliary columns preserved for inspection)" if validation["extra_features"] else ""
-        target_info = f" · Target column '{validation['target_column']}' detected & isolated as ground-truth reference" if validation.get("target_column") else ""
-        st.success(f"✅ Schema Verified: All {len(active_model.feature_names)} required features present{status_extra}{target_info}.")
-
-        with st.expander("🔍 Inspect Validated Schema & Auxiliary Columns", expanded=False):
-            c_req, c_aux = st.columns(2)
-            with c_req:
-                st.markdown(f"**Required Model Features ({len(active_model.feature_names)}):**")
-                st.dataframe(pd.DataFrame({"Feature": active_model.feature_names}), width="stretch", height=220)
-            with c_aux:
-                st.markdown(f"**Auxiliary Columns Preserved for Inspection ({len(validation['extra_features'])}):**")
-                if validation["extra_features"]:
-                    st.dataframe(pd.DataFrame({"Auxiliary Column": validation["extra_features"]}), width="stretch", height=220)
-                else:
-                    st.info("No auxiliary columns in input.")
-
-    st.markdown("---")
-
-    # -------------------------------------------------------------------------
-    # 3. Operational Triage Controls & Batch Inference
-    # -------------------------------------------------------------------------
-    st.subheader("3 · Suspiciousness Scoring & Triage Policy")
-    
-    # Active model context beside inference controls
-    st.markdown(f"""
-    <div style="background: #111c2e; border: 1px solid #1e293b; border-radius: 6px; padding: 10px 16px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-        <div>
-            <span style="color: #94a3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;">Scoring Engine:</span>
-            <strong style="color: #38bdf8; margin-left: 6px; font-size: 0.95rem;">{selected_model_key}</strong>
-        </div>
-        <div style="font-size: 0.85rem; color: #cbd5e1;">
-            <span>Dataset: <strong style="color: #f8fafc;">{model_meta.get('dataset_name', '')}</strong></span>
-            <span style="color: #64748b; margin: 0 8px;">|</span>
-            <span>Port Policy: <strong style="color: #f8fafc;">{model_meta.get('port_policy', '').replace('_', ' ').title()}</strong></span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    col_t1, col_t2 = st.columns([2, 1])
-    with col_t1:
-        risk_threshold = st.slider(
-            "Triage Suspiciousness Threshold",
-            min_value=0.05,
-            max_value=0.95,
-            value=0.50,
-            step=0.05,
-            help="Flows with uncalibrated risk score >= this threshold will be flagged for analyst review.",
-        )
-    with col_t2:
-        st.markdown("<div style='font-size:0.8rem;color:#94a3b8;padding-top:15px;'>"
-                    "Default: 0.50.<br>Lower threshold: Higher sensitivity (catches subtle beacons).<br>"
-                    "Higher threshold: Higher precision (focuses on critical alerts).</div>", unsafe_allow_html=True)
-
-    # Run / Retrieve Inference Results
-    # Use session_state caching to avoid repeated inference on widget changes
-    sig = f"{selected_model_key}_{len(input_df)}_{tuple(input_df.columns)}_{risk_threshold}"
-    
-    if st.session_state.get("inference_sig") != sig or "scored_df" not in st.session_state:
-        with st.spinner("Executing operational inference pipeline (NO retraining)..."):
-            try:
-                scored_df = score_flows_batch(input_df, active_model, threshold=risk_threshold)
-                st.session_state["scored_df"] = scored_df
-                st.session_state["inference_sig"] = sig
-            except Exception as e:
-                st.error(f"Inference execution failed: {type(e).__name__}: {e}")
-                st.stop()
-    else:
-        scored_df = st.session_state["scored_df"]
-        # Update is_flagged with current slider threshold
-        scored_df["is_flagged"] = scored_df["risk_score"] >= risk_threshold
-
-    # Calculate metrics
-    metrics = compute_triage_metrics(scored_df, threshold=risk_threshold)
-
-    # -------------------------------------------------------------------------
-    # 4. Triage Overview & Visualizations
-    # -------------------------------------------------------------------------
-    st.subheader("4 · Executive Triage Overview")
-    
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Analyzed Flows</div>
-            <div class="metric-val">{metrics['total_flows']:,}</div>
-            <div class="metric-sub">Single inference pass</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with k2:
-        flag_color = "#f43f5e" if metrics["flagged_count"] > 0 else "#34d399"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Flagged for Triage</div>
-            <div class="metric-val" style="color: {flag_color};">{metrics['flagged_count']:,} <span style="font-size:1rem;color:#94a3b8;">({metrics['flagged_pct']}%)</span></div>
-            <div class="metric-sub">Score ≥ {risk_threshold:.2f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with k3:
-        high_crit_count = metrics["tier_distribution"].get("HIGH", 0) + metrics["tier_distribution"].get("CRITICAL", 0)
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">High / Critical Tiers</div>
-            <div class="metric-val" style="color: #fb923c;">{high_crit_count:,}</div>
-            <div class="metric-sub">Score ≥ 0.65</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with k4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Risk Score Range</div>
-            <div class="metric-val">{metrics['mean_risk_score']:.3f} <span style="font-size:0.85rem;color:#94a3b8;">mean</span></div>
-            <div class="metric-sub">Min: {metrics['min_risk_score']:.3f} · Max: {metrics['max_risk_score']:.3f}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Charts: Class Distribution and Risk Tier Breakdown
-    c_chart1, c_chart2 = st.columns(2)
-    with c_chart1:
-        class_df = pd.DataFrame(list(metrics["class_distribution"].items()), columns=["Class", "Count"])
-        if not class_df.empty:
-            fig_class = px.pie(
-                class_df,
-                names="Class",
-                values="Count",
-                title="Predicted Class Distribution",
-                hole=0.45,
-                color_discrete_sequence=["#10b981", "#ef4444", "#3b82f6", "#f59e0b"],
-            )
-            fig_class.update_layout(template="plotly_dark", height=280, margin=dict(t=40, b=10, l=10, r=10))
-            st.plotly_chart(fig_class, width="stretch")
-
-    with c_chart2:
-        tier_order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-        tier_counts = [metrics["tier_distribution"].get(t, 0) for t in tier_order]
-        tier_colors = ["#10b981", "#f59e0b", "#f97316", "#ef4444"]
-        
-        fig_tier = go.Figure(data=[
-            go.Bar(
-                x=tier_order,
-                y=tier_counts,
-                marker_color=tier_colors,
-                text=tier_counts,
-                textposition="auto",
-            )
-        ])
-        fig_tier.update_layout(
-            title="Risk Tier Distribution",
-            template="plotly_dark",
-            height=280,
-            xaxis_title="Risk Tier",
-            yaxis_title="Flow Count",
-            margin=dict(t=40, b=10, l=10, r=10),
-        )
-        st.plotly_chart(fig_tier, width="stretch")
-
-    st.markdown("---")
-
-    # -------------------------------------------------------------------------
-    # 5. Flow Inspection Table & Multi-Criteria Filtering
-    # -------------------------------------------------------------------------
-    st.subheader("5 · Flow Inspection Table")
-    
-    # Filter Controls Bar
-    f_c1, f_c2, f_c3, f_c4 = st.columns(4)
-    with f_c1:
-        class_options = ["ALL"] + sorted(list(metrics["class_distribution"].keys()))
-        selected_class_filter = st.selectbox("Filter by Predicted Class", class_options, index=0)
-    with f_c2:
-        tier_options = ["ALL", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
-        selected_tier_filter = st.selectbox("Filter by Risk Tier", tier_options, index=0)
-    with f_c3:
-        flagged_only_toggle = st.checkbox("Show Flagged Flows Only", value=False)
-    with f_c4:
-        sort_option = st.selectbox(
-            "Sort Order",
-            options=["Risk Score (High → Low)", "Risk Score (Low → High)", "Original Flow Order"],
+    with ctrl_col1:
+        source_mode = st.selectbox(
+            "Select Ingestion Source",
+            options=[
+                "Deterministic Replay: Synthetic Enterprise Scenario (HTTPS Browsing + C2 Beacons)",
+                "Deterministic Replay: TQH-C2 Sample Stream (data/sample_tqh_c2_unlabelled.csv)",
+                "Deterministic Replay: CICIDS-2018 Sample Stream (data/sample_cicids2018_unlabelled.csv)",
+                "Live Network Adapter (Promiscuous Sniffing via Npcap)",
+            ],
             index=0,
         )
-        sort_map = {
-            "Risk Score (High → Low)": "risk_desc",
-            "Risk Score (Low → High)": "risk_asc",
-            "Original Flow Order": "flow_id_asc",
-        }
 
-    search_query = st.text_input("🔍 Search Traffic (IP, Port, Protocol, or Label)", "")
+    with ctrl_col2:
+        replay_speed = st.slider("Stream Speed (Delay/Flow)", min_value=0.1, max_value=2.0, value=0.5, step=0.1)
 
-    # Apply filters
-    filtered_df = filter_triage_flows(
-        scored_df,
-        label_filter=selected_class_filter,
-        tier_filter=selected_tier_filter,
-        flagged_only=flagged_only_toggle,
-        search_query=search_query,
-        sort_by=sort_map[sort_option],
-    )
+    with ctrl_col3:
+        st.write("")
+        st.write("")
+        btn_cols = st.columns(2)
+        with btn_cols[0]:
+            btn_start = st.button("▶ Start Stream", use_container_width=True)
+        with btn_cols[1]:
+            btn_stop = st.button("⏹ Stop Stream", use_container_width=True)
 
-    st.caption(f"Showing **{len(filtered_df):,}** of **{len(scored_df):,}** flows.")
+    # Ingestion Engine Actions
+    if btn_start:
+        if "Synthetic Enterprise Scenario" in source_mode:
+            st.session_state.replay_engine = FlowReplayEngine(
+                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
+            )
+            st.session_state.replay_engine.start_replay_synthetic(total_flows=120, c2_ratio=0.18)
+            st.success("Started Synthetic Enterprise Traffic Replay (C2 Beacons + Benign Browsing).")
+        elif "TQH-C2 Sample" in source_mode:
+            csv_p = "data/sample_tqh_c2_unlabelled.csv"
+            st.session_state.replay_engine = FlowReplayEngine(
+                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
+            )
+            st.session_state.replay_engine.start_replay_csv(csv_p, max_rows=150)
+            st.success(f"Started TQH-C2 Dataset Stream ({csv_p}).")
+        elif "CICIDS-2018 Sample" in source_mode:
+            csv_p = "data/sample_cicids2018_unlabelled.csv"
+            st.session_state.replay_engine = FlowReplayEngine(
+                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
+            )
+            st.session_state.replay_engine.start_replay_csv(csv_p, max_rows=150)
+            st.success(f"Started CICIDS-2018 Dataset Stream ({csv_p}).")
+        elif "Live Network Adapter" in source_mode:
+            if not backend_status.can_capture_live:
+                st.error("Live sniffing cannot be started because the Npcap driver is missing. Please use Replay Mode.")
+            else:
+                st.info("Live packet capture initialized on default adapter.")
 
-    # Determine display columns (present fields only)
-    traffic_fields = extract_available_traffic_fields(scored_df)
-    
-    primary_display_cols = ["flow_id", "risk_level", "risk_score", "predicted_label", "is_flagged"]
-    if "ground_truth_label" in scored_df.columns:
-        primary_display_cols.append("ground_truth_label")
+    if btn_stop:
+        if st.session_state.replay_engine and st.session_state.replay_engine.is_running:
+            st.session_state.replay_engine.stop()
+            st.warning("Replay stream stopped.")
 
-    # Append relevant traffic columns that actually exist
-    for _, col_name in traffic_fields.items():
-        if col_name and col_name in scored_df.columns and col_name not in primary_display_cols:
-            primary_display_cols.append(col_name)
+    # Live Flow Stream Table
+    st.markdown("### Real-Time Flow Feed")
+    flow_items = list(st.session_state.live_flows_buffer)
 
-    # Any remaining columns (up to 5 more)
-    remaining_cols = [c for c in scored_df.columns if c not in primary_display_cols and not c.startswith("prob_")]
-    display_cols = primary_display_cols + remaining_cols[:5]
+    if not flow_items:
+        st.info("No active flows captured yet. Click **▶ Start Stream** above to begin demonstration.")
+    else:
+        table_rows = []
+        for item in flow_items[:30]:
+            f: FlowRecord = item["flow"]
+            v: DetectionVerdict = item["verdict"]
 
-    st.dataframe(
-        filtered_df[display_cols].style.format({"risk_score": "{:.4f}"}),
-        width="stretch",
-        height=320,
-    )
+            badge = "🟢 Benign"
+            if v.status == "SUSPICIOUS":
+                badge = f"🔴 Suspicious ({v.risk_tier})"
+            elif v.status == "INSUFFICIENT_EVIDENCE":
+                badge = "⚪ Insufficient"
+
+            score_str = f"{v.raw_score:.2f}" if v.raw_score is not None else "N/A"
+
+            table_rows.append({
+                "Timestamp": datetime.datetime.fromtimestamp(f.last_seen, tz=datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3],
+                "Source": f"{f.src_ip}:{f.src_port}",
+                "Destination": f"{f.dst_ip}:{f.dst_port}",
+                "Proto": f.proto.upper(),
+                "Duration": f"{f.duration:.3f}s",
+                "Pkts (F/R)": f"{f.orig_pkts}/{f.resp_pkts}",
+                "Bytes": f"{f.tot_bytes:,}",
+                "State": f.conn_state,
+                "TLS SNI / JA4": f.sni or (f.ja4[:15] + "..." if f.ja4 else "N/A"),
+                "Verdict": badge,
+                "Score": score_str,
+            })
+
+        df_display = pd.DataFrame(table_rows)
+        st.dataframe(df_display, use_container_width=True, height=350)
+
+
+# =============================================================================
+# TAB 2: ALERTS & INCIDENTS
+# =============================================================================
+with tabs[1]:
+    st.subheader("2 · Analyst Incident Management & Evidence Triage")
+
+    inc_store: IncidentStore = st.session_state.incident_store
+    summary = inc_store.get_summary_metrics()
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    with s1:
+        st.metric("Total Incidents", summary["total_incidents"])
+    with s2:
+        st.metric("High Severity", summary["high_severity"])
+    with s3:
+        st.metric("Active Investigations", summary["active_investigations"])
+    with s4:
+        st.metric("Resolved", summary["resolved"])
+    with s5:
+        st.metric("Blocks Recorded", summary["blocks_recorded"])
 
     st.markdown("---")
 
-    # -------------------------------------------------------------------------
-    # 6. Flow Details Drill-Down
-    # -------------------------------------------------------------------------
-    st.subheader("6 · Flow Detail Drill-Down")
-    
-    if len(filtered_df) == 0:
-        st.info("No flows match current filter criteria.")
+    # Search & Filter Controls
+    f_c1, f_c2, f_c3 = st.columns([1, 1, 2])
+    with f_c1:
+        f_status = st.selectbox("Status Filter", ["All", "New", "Investigating", "Confirmed Suspicious", "Benign", "Resolved"])
+    with f_c2:
+        f_sev = st.selectbox("Severity Filter", ["All", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL"])
+    with f_c3:
+        search_txt = st.text_input("Search (Incident ID, IP, or Notes)", placeholder="e.g. 198.51.100.24")
+
+    incidents = inc_store.list_incidents(status_filter=f_status, severity_filter=f_sev, search_query=search_txt, limit=100)
+
+    if not incidents:
+        st.info("No security incidents found matching filter criteria.")
     else:
-        flow_ids = filtered_df["flow_id"].tolist()
-        selected_flow_id = st.selectbox("Select Flow to Inspect (# ID)", options=flow_ids, index=0)
-        
-        flow_row = scored_df[scored_df["flow_id"] == selected_flow_id].iloc[0]
-        
-        d_col1, d_col2 = st.columns([1, 2])
-        with d_col1:
-            st.markdown(f"#### Flow #{selected_flow_id} Summary")
-            st.markdown(f"- **Predicted Label**: `{flow_row['predicted_label']}`")
-            st.markdown(f"- **Risk Score**: `{flow_row['risk_score']:.4f}` (Uncalibrated)")
-            st.markdown(f"- **Risk Tier**: `{flow_row['risk_level']}`")
-            st.markdown(f"- **Triage Status**: `{'FLAGGED 🚨' if flow_row['is_flagged'] else 'NORMAL 🟢'}`")
-            
-            if "ground_truth_label" in flow_row:
-                st.markdown(f"- **Ground Truth (Reference)**: `{flow_row['ground_truth_label']}`")
+        # Table of incidents
+        inc_rows = []
+        for inc in incidents:
+            inc_rows.append({
+                "Incident ID": inc.incident_id,
+                "Created (UTC)": inc.created_at[:19],
+                "Target Endpoint": f"{inc.dst_ip}:{inc.dst_port}",
+                "Source Host": inc.src_ip,
+                "Severity": inc.severity,
+                "Detection Source": inc.detection_source,
+                "Occurrences": inc.occurrence_count,
+                "Status": inc.status,
+                "Response": inc.response_action,
+            })
+        df_inc = pd.DataFrame(inc_rows)
+        st.dataframe(df_inc, use_container_width=True, height=220)
 
-            # Display probabilities
-            st.markdown("**Model Class Probabilities:**")
-            for c in active_model.classes:
-                clean_c = f"prob_{c.replace(' ', '_').lower()}"
-                if clean_c in flow_row:
-                    st.progress(float(flow_row[clean_c]), text=f"{c}: {flow_row[clean_c]:.4f}")
+        # Detailed Investigation Pane
+        st.markdown("### Incident Investigation & Evidence Detail")
+        inc_ids = [inc.incident_id for inc in incidents]
+        selected_id = st.selectbox("Select Incident to Investigate", inc_ids, index=0)
 
-            st.caption("ℹ️ *Notice: Per-flow SHAP explanations are not fabricated. A validated explanation methodology will be integrated in a subsequent phase.*")
+        selected_inc = inc_store.get_incident(selected_id)
+        if selected_inc:
+            inv_col1, inv_col2 = st.columns([2, 1])
 
-        with d_col2:
-            st.markdown("#### Flow Feature Attributes")
-            # Present all feature values for this flow
-            feat_data = []
-            for feat in active_model.feature_names:
-                if feat in flow_row:
-                    feat_data.append({"Feature": feat, "Value": str(flow_row[feat])})
-            
-            # Auxiliary metadata
-            aux_data = []
-            for col, val in flow_row.items():
-                if col not in active_model.feature_names and col not in ["flow_id", "predicted_label", "risk_score", "risk_level", "is_flagged"] and not str(col).startswith("prob_"):
-                    aux_data.append({"Field": col, "Value": str(val)})
+            with inv_col1:
+                st.markdown(f"#### Incident Details: `{selected_inc.incident_id}`")
+                st.markdown(
+                    f"**Endpoints:** `{selected_inc.src_ip}:{selected_inc.src_port}` ➔ "
+                    f"`{selected_inc.dst_ip}:{selected_inc.dst_port}` ({selected_inc.proto.upper()})"
+                )
+                st.markdown(f"**First Seen:** `{selected_inc.created_at}` · **Last Seen:** `{selected_inc.last_seen}`")
+                st.markdown(f"**Deduplication Count:** `{selected_inc.occurrence_count}` occurrences coalesced")
 
-            tab_features, tab_aux = st.tabs(["Required Model Features", "Auxiliary Traffic Metadata"])
-            with tab_features:
-                st.dataframe(pd.DataFrame(feat_data), width="stretch", height=260)
-            with tab_aux:
-                if aux_data:
-                    st.dataframe(pd.DataFrame(aux_data), width="stretch", height=260)
+                st.markdown("**Supporting Evidence & Detection Indicators:**")
+                if not selected_inc.evidence:
+                    st.write("No explicit indicators attached.")
                 else:
-                    st.info("No additional auxiliary metadata columns present in input.")
+                    for ev in selected_inc.evidence:
+                        st.markdown(f"- **`{ev.get('indicator', 'EVIDENCE')}`**: {ev.get('description', '')} *(Confidence: {ev.get('confidence', 'N/A')})*")
 
-    st.markdown("---")
+                st.markdown("**Methodological Limitations & Research Context:**")
+                if not selected_inc.limitations:
+                    st.write("None recorded.")
+                else:
+                    for lim in selected_inc.limitations:
+                        st.markdown(f"- ⚠️ {lim}")
 
-    # -------------------------------------------------------------------------
-    # 7. Results Export Actions
-    # -------------------------------------------------------------------------
-    st.subheader("7 · Export Triage Results")
-    
-    st.markdown("Download scored flow records as CSV. Predictions, uncalibrated risk scores, risk levels, and original columns are included. "
-                "Source files are never overwritten.")
+            with inv_col2:
+                st.markdown("#### Analyst Triage Actions")
+                new_status = st.selectbox(
+                    "Update Incident Status",
+                    ["New", "Investigating", "Confirmed Suspicious", "Benign", "Resolved"],
+                    index=["New", "Investigating", "Confirmed Suspicious", "Benign", "Resolved"].index(selected_inc.status),
+                )
+                analyst_notes = st.text_area("Analyst Notes", value=selected_inc.analyst_notes, height=100)
 
-    exp_col1, exp_col2 = st.columns(2)
-    timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    
-    with exp_col1:
-        all_csv = format_csv_export(scored_df, flagged_only=False)
-        st.download_button(
-            label=f"📥 Download All Scored Flows ({len(scored_df):,} flows)",
-            data=all_csv,
-            file_name=f"xshield_scored_flows_{selected_model_key}_{timestamp_str}.csv",
-            mime="text/csv",
-            width="stretch",
-        )
-    with exp_col2:
-        flagged_count = int(scored_df["is_flagged"].sum())
-        flagged_csv = format_csv_export(scored_df, flagged_only=True)
-        st.download_button(
-            label=f"🚨 Download Flagged Flows Only ({flagged_count:,} flows)",
-            data=flagged_csv,
-            file_name=f"xshield_flagged_flows_{selected_model_key}_{timestamp_str}.csv",
-            mime="text/csv",
-            width="stretch",
-            disabled=(flagged_count == 0),
-        )
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    if st.button("💾 Save Updates", use_container_width=True):
+                        inc_store.update_status(selected_inc.incident_id, new_status, notes=analyst_notes)
+                        st.success("Incident updated.")
+                        st.rerun()
+
+                with col_b2:
+                    if st.button("🛡️ Block Target", use_container_width=True):
+                        st.session_state.quick_block_target = selected_inc.dst_ip
+                        st.info(f"Target `{selected_inc.dst_ip}` loaded into Network Response tab.")
 
 
 # =============================================================================
-# TAB 2: RESEARCH BASELINE EVALUATION (PHASE 1 PRESERVED WORKFLOW)
+# TAB 3: NETWORK RESPONSE
 # =============================================================================
-with tab_research:
-    st.subheader("🧪 Baseline Model Training & Empirical Evaluation")
-    st.info("Upload labelled CSV data to train and evaluate a real baseline. No demo metrics are fabricated.")
+with tabs[2]:
+    st.subheader("3 · Controlled Network Response & Reversible Blocking")
 
-    uploaded_research = st.file_uploader("Upload a labelled network-flow CSV", type=["csv"], key="research_uploader")
-    if uploaded_research is None:
-        r_a, r_b, r_c = st.columns(3)
-        r_a.metric("Analysis status", "Waiting for data")
-        r_b.metric("Model status", "Not trained")
-        r_c.metric("Explainability", "Not available yet")
-        st.markdown("### Workflow")
-        st.markdown("1. Upload a labelled CSV.\n2. Select the target label.\n3. Choose usable input features.\n4. Run the baseline and inspect measured results.")
-        st.warning("Flow-only data cannot validate the Flow + TLS hypothesis. TLS-only and Combined experiments require real TLS metadata for the same labelled flows.")
-    else:
-        try:
-            df_res = pd.read_csv(uploaded_research, low_memory=False)
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
-            st.stop()
+    resp_mgr: NetworkResponseManager = st.session_state.response_manager
 
-        if df_res.empty or len(df_res.columns) < 2:
-            st.error("The file needs at least one feature column and one target-label column.")
+    r_col1, r_col2 = st.columns([1, 1])
+
+    with r_col1:
+        st.markdown("### Action Configuration")
+        target_ip_input = st.text_input(
+            "Target Remote IP Address",
+            value=st.session_state.quick_block_target or "198.51.100.24",
+            help="Enter the remote IP to evaluate for block action.",
+        )
+        block_reason = st.text_input("Reason / Incident Justification", value="C2 Beaconing Pattern Verified")
+        block_dir = st.selectbox("Block Direction", ["outbound", "inbound"], index=0)
+
+        # Pre-execution safety check
+        rec = resp_mgr.recommend_block(target_ip_input, block_reason, direction=block_dir)
+
+        if not rec.get("allowed"):
+            st.error(f"Safety Violation: {rec.get('error')}")
         else:
-            st.markdown("#### 1 · Inspect Dataset")
-            r_a, r_b, r_c = st.columns(3)
-            r_a.metric("Rows", f"{len(df_res):,}")
-            r_b.metric("Columns", len(df_res.columns))
-            r_c.metric("Missing cells", f"{int(df_res.isna().sum().sum()):,}")
-            
-            with st.expander("Preview data", expanded=True):
-                st.dataframe(df_res.head(8), width="stretch")
-            
-            res_label_col = st.selectbox(
-                "Target label column",
-                list(df_res.columns),
-                index=len(df_res.columns) - 1,
-                key="res_label_col",
-            )
-            candidate_features = [col for col in df_res.columns if col != res_label_col]
-            res_features = st.multiselect(
-                "Input feature columns",
-                candidate_features,
-                default=candidate_features[:min(20, len(candidate_features))],
-                key="res_features",
-            )
-            res_test_size = st.slider("Test-set proportion", 0.15, 0.40, 0.20, 0.05, key="res_test_size")
-            st.caption("The basic random split is a first baseline, not proof of generalisation to unseen networks or capture sessions.")
+            st.markdown(f"**Proposed Rule:** `{rec['rule_name']}`")
+            st.markdown(f"**Scope:** {rec['scope']}")
+            if rec.get("warning"):
+                st.warning(rec["warning"])
 
-            if st.button("Train and evaluate baseline", type="primary", width="stretch", key="res_train_btn"):
-                if not res_features:
-                    st.error("Select at least one feature.")
-                else:
-                    with st.spinner("Training and evaluating Random Forest..."):
-                        st.session_state["research_result"] = run_experiment(df_res, res_label_col, res_features, res_test_size)
+            st.code(rec["proposed_command"], language="powershell")
 
-            res_result = st.session_state.get("research_result")
-            if res_result:
-                if res_result.get("error"):
-                    st.error(res_result["error"])
+            # Analyst Confirmation Checkbox (Mandatory Safety Gate)
+            confirmed = st.checkbox(
+                f"I explicitly confirm blocking {block_dir} traffic to {target_ip_input}.",
+                value=False,
+            )
+            live_opt_in = st.checkbox(
+                "Request Live Windows Firewall Enforcement (Requires Administrator privileges)",
+                value=False,
+                help="If unchecked, executes safely in Simulation Mode without modifying system settings.",
+            )
+
+            if st.button("⚡ Apply Response Action", disabled=not confirmed, use_container_width=True):
+                result = resp_mgr.apply_block(
+                    target_ip=target_ip_input,
+                    reason=block_reason,
+                    direction=block_dir,
+                    live_requested=live_opt_in,
+                )
+                if result.status == "SIMULATED":
+                    st.success(f"SIMULATION RECORDED: {result.details}")
+                elif result.status == "ENFORCED":
+                    st.success(f"LIVE FIREWALL RULE CREATED: {result.details}")
                 else:
-                    st.markdown("#### 2 · Evaluation Results")
-                    rm = res_result["metrics"]
-                    ra, rb, rc, rd = st.columns(4)
-                    ra.metric("Accuracy", f'{rm["accuracy"]:.3f}')
-                    rb.metric("Precision (weighted)", f'{rm["precision"]:.3f}')
-                    rc.metric("Recall (weighted)", f'{rm["recall"]:.3f}')
-                    rd.metric("F1 (weighted)", f'{rm["f1"]:.3f}')
-                    st.caption(f'Rows used: {res_result["n_rows"]:,} · Features: {res_result["n_features"]} · Model: Random Forest')
-                    
-                    left, right = st.columns(2)
-                    with left:
-                        st.markdown("##### Confusion matrix")
-                        st.dataframe(
-                            pd.DataFrame(res_result["confusion"], index=res_result["class_names"], columns=res_result["class_names"]),
-                            width="stretch",
-                        )
-                        st.caption("Rows are actual classes; columns are predicted classes.")
-                    with right:
-                        st.markdown("##### Most influential features")
-                        imp = pd.DataFrame(res_result["importance"], columns=["Feature", "Importance"]).head(15).sort_values("Importance")
-                        if not imp.empty:
-                            fig = px.bar(imp, x="Importance", y="Feature", orientation="h")
-                            fig.update_layout(template="plotly_dark", height=430)
-                            st.plotly_chart(fig, width="stretch")
-                    
-                    st.markdown("##### Classification report")
-                    st.dataframe(pd.DataFrame(res_result["report"]).T, width="stretch")
-                    st.warning("Metrics describe this dataset and split only. Check duplicates, leakage-prone columns, class balance and capture/session grouping before making research claims.")
-                    st.download_button(
-                        "Download evaluation report (JSON)",
-                        json.dumps(res_result["export"], indent=2),
-                        "xshield_evaluation_report.json",
-                        "application/json",
-                    )
+                    st.error(f"Action Failed: {result.details}")
+                st.rerun()
+
+    with r_col2:
+        st.markdown("### Active XShield Block Rules & Rollback")
+        rules = resp_mgr.list_active_rules()
+
+        if not rules:
+            st.info("No active block rules recorded.")
+        else:
+            for r in rules:
+                with st.expander(f"{'⚡ LIVE' if r.is_live else '🛡️ SIM'} · `{r.target_ip}` ({r.status})", expanded=True):
+                    st.markdown(f"**Rule Name:** `{r.rule_name}`")
+                    st.markdown(f"**Status:** `{r.status}` · **Created:** `{r.created_at[:19]}`")
+                    st.markdown(f"**Details:** {r.details}")
+
+                    if r.status in ["SIMULATED", "ENFORCED"]:
+                        if st.button(f"↩️ Rollback / Unblock {r.target_ip}", key=f"rb_{r.rule_name}"):
+                            ok = resp_mgr.rollback_block(r.rule_name)
+                            if ok:
+                                st.success(f"Rule '{r.rule_name}' successfully rolled back.")
+                                st.rerun()
+                            else:
+                                st.error("Rollback operation failed.")
+
+
+# =============================================================================
+# TAB 4: HISTORICAL ANALYSIS
+# =============================================================================
+with tabs[3]:
+    st.subheader("4 · Historical Detection Analytics & Event Export")
+
+    all_incidents = inc_store.list_incidents(limit=500)
+
+    if not all_incidents:
+        st.info("No historical events recorded yet.")
+    else:
+        df_all = pd.DataFrame([asdict(i) for i in all_incidents])
+
+        h_c1, h_c2 = st.columns(2)
+        with h_c1:
+            # Severity distribution chart
+            sev_counts = df_all["severity"].value_counts().reset_index()
+            sev_counts.columns = ["Severity", "Count"]
+            fig_sev = px.pie(
+                sev_counts,
+                names="Severity",
+                values="Count",
+                title="Historical Incident Severity Distribution",
+                hole=0.45,
+                color="Severity",
+                color_discrete_map={
+                    "HIGH": "#ef4444",
+                    "MEDIUM": "#f59e0b",
+                    "LOW": "#10b981",
+                    "INFORMATIONAL": "#64748b",
+                },
+            )
+            fig_sev.update_layout(template="plotly_dark", height=280)
+            st.plotly_chart(fig_sev, use_container_width=True)
+
+        with h_c2:
+            # Detection source distribution
+            src_counts = df_all["detection_source"].value_counts().reset_index()
+            src_counts.columns = ["Source", "Count"]
+            fig_src = px.bar(
+                src_counts,
+                x="Source",
+                y="Count",
+                title="Detections by Attribution Source",
+                color="Source",
+                color_discrete_sequence=["#3b82f6", "#8b5cf6", "#ec4899"],
+            )
+            fig_src.update_layout(template="plotly_dark", height=280)
+            st.plotly_chart(fig_src, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### Export Sanitized Event Log")
+        csv_data = df_all[[
+            "incident_id", "created_at", "last_seen", "src_ip", "dst_ip", "dst_port",
+            "proto", "severity", "detection_source", "raw_score", "status", "response_action"
+        ]].to_csv(index=False)
+
+        st.download_button(
+            "📥 Download Sanitized Incident History (CSV)",
+            data=csv_data,
+            file_name=f"xshield_incidents_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+
+
+# =============================================================================
+# TAB 5: SYSTEM HEALTH
+# =============================================================================
+with tabs[4]:
+    st.subheader("5 · Capture & Infrastructure Diagnostics")
+
+    diag_c1, diag_c2 = st.columns(2)
+
+    with diag_c1:
+        st.markdown("#### Packet Capture Subsystem")
+        st.markdown(f"- **Npcap Driver Installed:** `{'✅ YES' if backend_status.is_npcap_installed else '❌ NO (Replay active)'}`")
+        st.markdown(f"- **Administrator Elevation:** `{'✅ YES' if backend_status.is_admin else '⚠️ NO (Standard User)'}`")
+        st.markdown(f"- **Recommended Mode:** `{backend_status.recommended_mode.upper()}`")
+        st.info(backend_status.status_message)
+
+        st.markdown("#### Host Network Adapters Discovered")
+        if not backend_status.interfaces:
+            st.write("No physical network adapters enumerated.")
+        else:
+            df_if = pd.DataFrame(backend_status.interfaces)
+            st.dataframe(df_if[["name", "description", "status", "speed"]], use_container_width=True)
+
+    with diag_c2:
+        st.markdown("#### Model & Schema Catalog")
+        manifest = load_manifest_models(MODELS_DIR)
+        for key, m_info in manifest.items():
+            avail = m_info.get("is_available", False)
+            st.markdown(f"- **`{key}`**: `{'🟢 Available' if avail else '🔴 Missing'}` ({len(m_info.get('feature_names', []))} features, Policy: `{m_info.get('port_policy')}`)")
+
+        st.markdown("#### Safety & Response Health")
+        st.markdown(f"- **Active Response Mode:** `{'SIMULATION ONLY' if resp_mgr.simulation_mode else 'LIVE ENFORCEMENT'}`")
+        st.markdown(f"- **Alert Cooldown:** `60 seconds` per endpoint pair")
+        st.markdown(f"- **Protected Host Endpoints:** `{len(PROTECTED_IPS)} critical IPs blacklisted from blocking`")
+
+
+# =============================================================================
+# TAB 6: OFFLINE CSV TRIAGE (PHASE 2)
+# =============================================================================
+with tabs[5]:
+    st.subheader("6 · Offline CSV Dataset Triage & Batch Scoring")
+
+    manifest = load_manifest_models(MODELS_DIR)
+    if not manifest:
+        st.error("No models found in models/manifest.json.")
+    else:
+        # Re-use Phase 2 offline triage logic
+        model_names = list(manifest.keys())
+        selected_model_name = st.selectbox("Select Model for CSV Triage", model_names, index=0)
+
+        uploaded_file = st.file_uploader("Upload Network Flow CSV for Offline Triage", type=["csv"])
+
+        # Quick sample loader
+        sample_choice = st.selectbox(
+            "Or load verified demonstration sample:",
+            ["None", "TQH-C2 Sample (data/sample_tqh_c2_unlabelled.csv)", "CICIDS-2018 Sample (data/sample_cicids2018_unlabelled.csv)"]
+        )
+
+        df_offline = None
+        if uploaded_file is not None:
+            df_offline = pd.read_csv(uploaded_file)
+        elif sample_choice != "None":
+            sample_p = "data/sample_tqh_c2_unlabelled.csv" if "TQH-C2" in sample_choice else "data/sample_cicids2018_unlabelled.csv"
+            df_offline = pd.read_csv(sample_p)
+
+        if df_offline is not None:
+            st.write(f"Loaded DataFrame: {len(df_offline):,} rows, {len(df_offline.columns)} columns.")
+            compat = assess_dataset_compatibility(df_offline, manifest, selected_model_name)
+
+            if not compat["current_model_compatibility"]["is_compatible"]:
+                st.error(f"Schema Mismatch with model '{selected_model_name}': Missing {len(compat['current_model_compatibility']['missing_features'])} features.")
+            else:
+                st.success(f"Schema compatible with '{selected_model_name}'.")
+                if st.button("🚀 Run Batch Triage Scoring"):
+                    loaded_m = load_model(selected_model_name)
+                    scored_df = score_flows_batch(df_offline, loaded_m)
+                    st.dataframe(scored_df.head(20), use_container_width=True)
+
+
+# =============================================================================
+# TAB 7: MODEL RESEARCH (PHASE 1)
+# =============================================================================
+with tabs[6]:
+    st.subheader("7 · Baseline Research & Model Training (Phase 1)")
+    st.markdown("""
+    Baseline training routines, dataset splits, and research validation reports from Phase 1.
+    All models and training runs observe research isolation boundaries.
+    """)
+    st.markdown("Refer to [`reports/phase3_audit/audit_report.md`](file:///g:/IdeaLab/XShield_Starter/reports/phase3_audit/audit_report.md) for complete empirical audit results.")
