@@ -10,6 +10,7 @@ Phase 4 Live Demonstration & Operational Dashboard
 """
 
 from collections import deque
+from dataclasses import asdict
 import datetime
 from io import StringIO
 import json
