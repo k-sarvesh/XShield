@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+.vscode/
+.idea/
+
+# Large raw datasets (> 10MB)
+data/*.zip
+data/*.parquet
+data/Friday*
+data/sample.csv
+data/sample_clean.csv
+

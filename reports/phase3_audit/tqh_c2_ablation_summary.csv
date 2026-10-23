@@ -1,0 +1,9 @@
+Experiment,Description,Features,Mean_Accuracy,Std_Accuracy,Mean_Bal_Accuracy,Std_Bal_Accuracy,Mean_Macro_F1,Std_Macro_F1,Mean_ROC_AUC,Std_ROC_AUC,OOF_FPR,OOF_FN,OOF_FP
+TQH_1_all_approved_features,Existing Phase 1 approved feature set (14 features including port and TLS fingerprints),14,1.0,0.0,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0,0
+TQH_2_port_excluded,"Port features removed (resp_p excluded, keeping ja4/ja4s and flow stats)",13,0.9999788180470239,4.236390595213634e-05,0.9999375156210948,0.00012496875781053962,0.9999623740754909,7.525184901813198e-05,1.0,0.0,0.0,2,0
+TQH_3_tls_fingerprints_excluded,JA4 and JA4S fingerprints removed (keeping resp_p and flow stats),12,1.0,0.0,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0,0
+TQH_4_port_and_tls_fingerprints_excluded,"Both destination port (resp_p) and TLS fingerprints (ja4, ja4s) removed",11,0.999989409023512,2.118195297606817e-05,0.9999687578105474,6.248437890526981e-05,0.9999811889093195,3.762218136105222e-05,1.0,0.0,0.0,1,0
+TQH_5_pure_flow_statistics_only,"Pure flow volume/packet size statistics only (all identity, port, fingerprints, proto, and conn_state/history removed)",8,1.0,0.0,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0,0
+TQH_6_resp_p_only,Standalone destination port shortcut check (resp_p only),1,1.0,0.0,1.0,0.0,1.0,0.0,1.0,0.0,0.0,0,0
+TQH_7_ja4_only,Standalone JA4 fingerprint shortcut check (ja4 only),1,0.999927239995809,7.260068189418912e-05,0.9997423004653828,0.0002121143529715433,0.99984975866782,0.00012741428795633863,0.9997423004653828,0.0002121143529715433,0.0,7,0
+TQH_8_conn_state_only,Standalone connection state shortcut check (conn_state only),1,0.9910933850702939,0.00285822935015083,0.9714183452630949,0.005593835936287475,0.9794901622966083,0.003422335193716958,0.9753199777623373,0.004745229828618655,0.002026680654737068,685,170

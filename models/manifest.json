@@ -1,0 +1,117 @@
+{
+  "models": {
+    "xshield_tqh_c2_port_inclusive": {
+      "model_name": "xshield_tqh_c2_port_inclusive",
+      "artifact_file": "xshield_tqh_c2_port_inclusive.joblib",
+      "metadata_file": "xshield_tqh_c2_port_inclusive_metadata.json",
+      "dataset_name": "TQH-C2 Testbed A (Sliver TLS)",
+      "port_policy": "port_inclusive",
+      "task_type": "binary",
+      "feature_count": 14,
+      "classes": [
+        "benign",
+        "malicious_c2"
+      ],
+      "created_at": "2026-10-20T17:50:43.300845+00:00",
+      "evaluation_summary": {
+        "evaluation_strategy": "GroupKFold (n_splits=4, grouped by capture_id)",
+        "mean_accuracy": 1.0,
+        "std_accuracy": 0.0,
+        "mean_balanced_accuracy": 1.0,
+        "std_balanced_accuracy": 0.0,
+        "mean_macro_f1": 1.0,
+        "std_macro_f1": 0.0,
+        "mean_roc_auc": 1.0,
+        "std_roc_auc": 0.0,
+        "out_of_fold_accuracy": 1.0,
+        "out_of_fold_balanced_accuracy": 1.0,
+        "out_of_fold_macro_f1": 1.0,
+        "out_of_fold_weighted_f1": 1.0,
+        "out_of_fold_roc_auc": 1.0
+      }
+    },
+    "xshield_tqh_c2_port_excluded": {
+      "model_name": "xshield_tqh_c2_port_excluded",
+      "artifact_file": "xshield_tqh_c2_port_excluded.joblib",
+      "metadata_file": "xshield_tqh_c2_port_excluded_metadata.json",
+      "dataset_name": "TQH-C2 Testbed A (Sliver TLS)",
+      "port_policy": "port_excluded",
+      "task_type": "binary",
+      "feature_count": 13,
+      "classes": [
+        "benign",
+        "malicious_c2"
+      ],
+      "created_at": "2026-10-20T17:51:07.181469+00:00",
+      "evaluation_summary": {
+        "evaluation_strategy": "GroupKFold (n_splits=4, grouped by capture_id)",
+        "mean_accuracy": 0.9999788180470239,
+        "std_accuracy": 3.668821875808486e-05,
+        "mean_balanced_accuracy": 0.9999375156210948,
+        "std_balanced_accuracy": 0.00010822611894331229,
+        "mean_macro_f1": 0.9999623740754909,
+        "std_macro_f1": 6.517001293145335e-05,
+        "mean_roc_auc": 1.0,
+        "std_roc_auc": 0.0,
+        "out_of_fold_accuracy": 0.9999791490736976,
+        "out_of_fold_balanced_accuracy": 0.9999169297225452,
+        "out_of_fold_macro_f1": 0.9999525006562574,
+        "out_of_fold_weighted_f1": 0.9999791483318669,
+        "out_of_fold_roc_auc": 1.0
+      }
+    },
+    "xshield_cicids2018_port_inclusive": {
+      "model_name": "xshield_cicids2018_port_inclusive",
+      "artifact_file": "xshield_cicids2018_port_inclusive.joblib",
+      "metadata_file": "xshield_cicids2018_port_inclusive_metadata.json",
+      "dataset_name": "CICIDS-2018 Botnet Sample",
+      "port_policy": "port_inclusive",
+      "task_type": "binary",
+      "feature_count": 68,
+      "classes": [
+        "Benign",
+        "Bot"
+      ],
+      "created_at": "2026-10-20T17:51:22.239737+00:00",
+      "evaluation_summary": {
+        "evaluation_strategy": "Stratified train_test_split (test_size=0.20, random_state=42)",
+        "train_samples": 79630,
+        "test_samples": 19908,
+        "accuracy": 0.9998995378742214,
+        "balanced_accuracy": 0.999937280481686,
+        "macro_f1": 0.9998425348690587,
+        "weighted_f1": 0.9998995473921717,
+        "precision_weighted": 0.9998995885359085,
+        "recall_weighted": 0.9998995378742214,
+        "roc_auc": 0.9999999367108796
+      }
+    },
+    "xshield_cicids2018_port_excluded": {
+      "model_name": "xshield_cicids2018_port_excluded",
+      "artifact_file": "xshield_cicids2018_port_excluded.joblib",
+      "metadata_file": "xshield_cicids2018_port_excluded_metadata.json",
+      "dataset_name": "CICIDS-2018 Botnet Sample",
+      "port_policy": "port_excluded",
+      "task_type": "binary",
+      "feature_count": 67,
+      "classes": [
+        "Benign",
+        "Bot"
+      ],
+      "created_at": "2026-10-20T17:51:38.180719+00:00",
+      "evaluation_summary": {
+        "evaluation_strategy": "Stratified train_test_split (test_size=0.20, random_state=42)",
+        "train_samples": 79630,
+        "test_samples": 19908,
+        "accuracy": 0.999648382559775,
+        "balanced_accuracy": 0.999685706228105,
+        "macro_f1": 0.9994490286219542,
+        "weighted_f1": 0.9996484657973272,
+        "precision_weighted": 0.9996487464779497,
+        "recall_weighted": 0.999648382559775,
+        "roc_auc": 0.9999989240849532
+      }
+    }
+  },
+  "last_updated": "2026-10-20T17:51:38.293367+00:00"
+}
