@@ -2,9 +2,11 @@
 
 Ensures:
 - Deduplication of repeated beacon events using configurable cooldown windows.
+- Separation of flows by source, destination, port, and transport protocol.
 - Creation and update of persistent IncidentRecords in IncidentStore.
+- Transparent tracking of synthetic/replayed demonstration fixtures.
 - Thread-safe notification caching for the analyst user interface.
-- Optional sanitized webhook dispatch when XSHIELD_WEBHOOK_URL is configured.
+- Safe webhook dispatch with delivery tracking and error logging.
 """
 
 from dataclasses import dataclass, field
@@ -19,7 +21,7 @@ import urllib.request
 
 from xshield.detection.engine import DetectionVerdict
 from xshield.flows.flow_record import FlowRecord
-from xshield.storage.incident_store import IncidentRecord, IncidentStore
+from xshield.storage.incident_store import IncidentRecord, IncidentStore, sanitize_incident_export
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,10 @@ class AlertNotification:
     message: str
     src_endpoint: str
     dst_endpoint: str
+    is_synthetic: bool = False
     is_read: bool = False
+    webhook_delivered: Optional[bool] = None
+    webhook_error: Optional[str] = None
 
 
 class AlertManager:
@@ -51,7 +56,7 @@ class AlertManager:
         self.cooldown_seconds = cooldown_seconds
         self.webhook_url = webhook_url or os.environ.get("XSHIELD_WEBHOOK_URL")
 
-        # Map tracking last alert timestamp per target tuple: (src_ip, dst_ip, dst_port) -> last_alert_time
+        # Map tracking last alert timestamp per target tuple: (src_ip, dst_ip, dst_port, proto) -> last_alert_time
         self._last_alert_time: Dict[str, float] = {}
         self._recent_notifications: List[AlertNotification] = []
         self._lock = threading.Lock()
@@ -62,14 +67,18 @@ class AlertManager:
             return None
 
         now = time.time()
-        dedup_key = f"{flow.src_ip}->{flow.dst_ip}:{flow.dst_port}"
+        proto_clean = flow.proto.lower()
+        dedup_key = f"{flow.src_ip}->{flow.dst_ip}:{flow.dst_port}/{proto_clean}"
+        is_synthetic = bool(getattr(flow, "is_replayed", False) or getattr(verdict, "is_synthetic", False))
 
         with self._lock:
             last_time = self._last_alert_time.get(dedup_key, 0.0)
             time_since_last = now - last_time
 
-            # Check if active incident already exists in store
-            existing_inc = self.store.find_active_incident(flow.src_ip, flow.dst_ip, flow.dst_port)
+            # Check if active incident already exists in store for this endpoint pair and protocol
+            existing_inc = self.store.find_active_incident(
+                flow.src_ip, flow.dst_ip, flow.dst_port, proto=proto_clean
+            )
 
             if existing_inc and time_since_last < self.cooldown_seconds:
                 # Within cooldown: update existing incident frequency and last_seen without creating duplicate alert
@@ -109,14 +118,16 @@ class AlertManager:
                 analyst_notes=existing_inc.analyst_notes if existing_inc else "",
                 response_action=existing_inc.response_action if existing_inc else "None",
                 occurrence_count=inc_count,
+                is_synthetic=is_synthetic,
             )
             self.store.save_incident(new_record)
 
             # Generate analyst notification
             alert_id = f"ALT-{int(now)}-{hashlib.sha256(f'{inc_id}_{now}'.encode()).hexdigest()[:6].upper()}"
             title = f"{verdict.risk_tier} Severity Detection: {flow.dst_ip}:{flow.dst_port}"
+            prefix = "[SYNTHETIC DEMO] " if is_synthetic else ""
             msg = (
-                f"Suspicious {flow.proto.upper()} traffic detected from {flow.src_ip} to {flow.dst_ip}:{flow.dst_port}. "
+                f"{prefix}Suspicious {flow.proto.upper()} traffic detected from {flow.src_ip} to {flow.dst_ip}:{flow.dst_port}. "
                 f"Source: {verdict.detection_source}. "
             )
             if verdict.raw_score is not None:
@@ -131,6 +142,7 @@ class AlertManager:
                 message=msg,
                 src_endpoint=f"{flow.src_ip}:{flow.src_port}",
                 dst_endpoint=f"{flow.dst_ip}:{flow.dst_port}",
+                is_synthetic=is_synthetic,
             )
 
             self._recent_notifications.insert(0, notif)
@@ -158,7 +170,7 @@ class AlertManager:
             self._recent_notifications.clear()
 
     def _dispatch_webhook(self, notif: AlertNotification, inc: IncidentRecord) -> None:
-        """Safely dispatches sanitized JSON alert to external webhook if configured."""
+        """Safely dispatches sanitized JSON alert to external webhook with status tracking."""
         if not self.webhook_url:
             return
         try:
@@ -172,6 +184,7 @@ class AlertManager:
                 "message": notif.message,
                 "src": notif.src_endpoint,
                 "dst": notif.dst_endpoint,
+                "is_synthetic": notif.is_synthetic,
             }
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(
@@ -181,6 +194,12 @@ class AlertManager:
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=3.0) as resp:
-                pass
+                if 200 <= resp.status < 300:
+                    notif.webhook_delivered = True
+                else:
+                    notif.webhook_delivered = False
+                    notif.webhook_error = f"HTTP {resp.status}"
         except Exception as e:
-            logger.debug(f"Webhook dispatch failed: {e}")
+            notif.webhook_delivered = False
+            notif.webhook_error = str(e)
+            logger.warning(f"Webhook dispatch failed: {e}")

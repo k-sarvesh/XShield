@@ -145,3 +145,30 @@ G:\IdeaLab\XShield_Starter
 - Upgrade `app.py` with multi-page navigation (Live Monitor, Alerts & Incidents, Network Response, Historical Analysis, System Health) while preserving existing Offline CSV Triage.
 - Add comprehensive automated test suite in `tests/test_phase4.py`.
 - Create `docs/DEMO_RUNBOOK.md` with complete 5-minute presentation script and step-by-step instructions.
+
+---
+
+## 6. Phase 4.1 Hardening & Independent Verification Outcomes
+
+During the Phase 4.1 skeptical engineering and QA review, several subtle architectural issues were identified, corrected, and verified:
+
+1. **Pre-Sniff Driver Guard**:
+   - `xshield/monitoring/capture.py`: Added explicit Npcap verification before worker thread spawning. Prevents unhandled driver exceptions and thread leakage on Windows hosts lacking `npcap.sys`.
+2. **Schema Incompatibility Verdict Correction**:
+   - `xshield/detection/engine.py`: Corrected inference fallback when required features are missing. The engine now strictly emits `INSUFFICIENT_EVIDENCE` (risk tier: `INFORMATIONAL`), eliminating false `BENIGN` classifications.
+3. **Synthetic Origin Attribution**:
+   - Added `is_synthetic: bool` tracking across `FlowRecord`, `DetectionVerdict`, `IncidentRecord`, and UI presentation. Prevents conflating synthetic lab demonstrations with physical network evaluations.
+4. **4-Tuple Deduplication & Persistence**:
+   - `xshield/alerts/alert_manager.py` & `xshield/storage/incident_store.py`: Upgraded deduplication key to include transport protocol (`src->dst:port/proto`), preventing TCP and UDP flows targeting the same port from erroneously coalescing.
+5. **Rule Expiration, Verification & Ownership Guard**:
+   - `xshield/response/blocker.py`:
+     - Added temporary containment expiration (`duration_minutes`, `expires_at`, `cleanup_expired_rules()`).
+     - Added post-execution verification using `netsh advfirewall firewall show rule`.
+     - Hardened ownership enforcement: `rollback_block()` strictly rejects any rule not matching the `XShield_Block_` prefix.
+     - Expanded safety blacklist to include RFC 3927 link-local (`169.254.0.0/16`, `fe80::/10`) and reserved addresses.
+6. **Data Sanitization & Forensic Export**:
+   - `xshield/storage/incident_store.py`: Implemented `sanitize_incident_export` with control-character stripping and optional RFC 1918 internal IP masking for compliance and external sharing.
+7. **10-Step Deterministic Acceptance Test**:
+   - Created `tests/test_demo_acceptance.py` validating the entire replay-to-response-to-export chain across 4 deterministic test cases.
+   - Total automated test count increased to **47 passing tests** (0 failed, 0 skipped).
+

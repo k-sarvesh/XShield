@@ -8,6 +8,7 @@ import datetime
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,7 @@ class IncidentRecord:
     analyst_notes: str = ""
     response_action: str = "None" # 'None', 'Simulated Block', 'Enforced Block', 'Rolled Back'
     occurrence_count: int = 1
+    is_synthetic: bool = False
 
 
 class IncidentStore:
@@ -45,7 +47,8 @@ class IncidentStore:
 
     def __init__(self, db_path: Path = DEFAULT_DB_PATH):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(self.db_path) != ":memory:":
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._init_db()
 
@@ -79,7 +82,8 @@ class IncidentStore:
                             status TEXT NOT NULL,
                             analyst_notes TEXT,
                             response_action TEXT,
-                            occurrence_count INTEGER DEFAULT 1
+                            occurrence_count INTEGER DEFAULT 1,
+                            is_synthetic INTEGER DEFAULT 0
                         )
                     """)
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_dst ON incidents(dst_ip, dst_port)")
@@ -87,7 +91,6 @@ class IncidentStore:
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents(severity)")
             finally:
                 conn.close()
-
 
     def save_incident(self, inc: IncidentRecord) -> None:
         """Inserts or updates an incident record."""
@@ -100,15 +103,17 @@ class IncidentStore:
                         INSERT INTO incidents (
                             incident_id, created_at, last_seen, src_ip, dst_ip, src_port, dst_port,
                             proto, severity, detection_source, raw_score, model_name, evidence_json,
-                            limitations_json, status, analyst_notes, response_action, occurrence_count
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            limitations_json, status, analyst_notes, response_action, occurrence_count,
+                            is_synthetic
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(incident_id) DO UPDATE SET
                             last_seen=excluded.last_seen,
                             occurrence_count=excluded.occurrence_count,
                             evidence_json=excluded.evidence_json,
                             response_action=excluded.response_action,
                             status=excluded.status,
-                            analyst_notes=excluded.analyst_notes
+                            analyst_notes=excluded.analyst_notes,
+                            is_synthetic=excluded.is_synthetic
                         """,
                         (
                             inc.incident_id,
@@ -129,6 +134,7 @@ class IncidentStore:
                             inc.analyst_notes,
                             inc.response_action,
                             inc.occurrence_count,
+                            1 if inc.is_synthetic else 0,
                         ),
                     )
             finally:
@@ -147,20 +153,25 @@ class IncidentStore:
             finally:
                 conn.close()
 
-    def find_active_incident(self, src_ip: str, dst_ip: str, dst_port: int) -> Optional[IncidentRecord]:
-        """Searches for an open/investigating incident on matching endpoint pair."""
+    def find_active_incident(
+        self, src_ip: str, dst_ip: str, dst_port: int, proto: Optional[str] = None
+    ) -> Optional[IncidentRecord]:
+        """Searches for an open/investigating incident on matching endpoint pair and protocol."""
         with self._lock:
             conn = self._get_connection()
             try:
-                cur = conn.execute(
-                    """
-                    SELECT * FROM incidents 
-                    WHERE src_ip = ? AND dst_ip = ? AND dst_port = ? 
-                    AND status IN ('New', 'Investigating')
-                    ORDER BY last_seen DESC LIMIT 1
-                    """,
-                    (src_ip, dst_ip, dst_port),
+                query = (
+                    "SELECT * FROM incidents "
+                    "WHERE src_ip = ? AND dst_ip = ? AND dst_port = ? "
+                    "AND status IN ('New', 'Investigating')"
                 )
+                params: List[Any] = [src_ip, dst_ip, dst_port]
+                if proto:
+                    query += " AND LOWER(proto) = LOWER(?)"
+                    params.append(proto)
+
+                query += " ORDER BY last_seen DESC LIMIT 1"
+                cur = conn.execute(query, tuple(params))
                 row = cur.fetchone()
                 if not row:
                     return None
@@ -251,6 +262,15 @@ class IncidentStore:
             finally:
                 conn.close()
 
+    def export_incidents_csv(self, anonymize_internal: bool = False) -> str:
+        """Exports stored incidents to CSV using sanitized schema and optional IP anonymization."""
+        import pandas as pd
+        incidents = self.list_incidents(limit=10000)
+        sanitized = sanitize_incident_export(incidents, anonymize_internal=anonymize_internal)
+        if not sanitized:
+            return "incident_id,created_at,last_seen,src_ip,dst_ip,dst_port,proto,severity,detection_source,raw_score,status,response_action,occurrences,is_synthetic_fixture,analyst_notes\n"
+        return pd.DataFrame(sanitized).to_csv(index=False)
+
     def _row_to_record(self, row: sqlite3.Row) -> IncidentRecord:
         """Converts a SQLite Row to a typed IncidentRecord."""
         evidence = []
@@ -265,6 +285,13 @@ class IncidentStore:
             if row["limitations_json"]:
                 limitations = json.loads(row["limitations_json"])
         except Exception:
+            pass
+
+        # Check is_synthetic if column exists in table
+        is_synth = False
+        try:
+            is_synth = bool(row["is_synthetic"])
+        except (IndexError, KeyError):
             pass
 
         return IncidentRecord(
@@ -286,4 +313,48 @@ class IncidentStore:
             analyst_notes=row["analyst_notes"] or "",
             response_action=row["response_action"] or "None",
             occurrence_count=row["occurrence_count"],
+            is_synthetic=is_synth,
         )
+
+
+def sanitize_incident_export(
+    incidents: List[IncidentRecord], anonymize_internal: bool = False
+) -> List[Dict[str, Any]]:
+    """Sanitizes incident records for threat intelligence sharing or compliance export.
+
+    - Strips control characters from text fields.
+    - Anonymizes internal RFC 1918 IPs if requested.
+    - Explicitly labels synthetic/replayed demo records.
+    """
+    sanitized = []
+    for inc in incidents:
+        src_ip = inc.src_ip
+        if anonymize_internal:
+            try:
+                import ipaddress
+                if ipaddress.ip_address(src_ip).is_private:
+                    src_ip = "192.168.x.x (internal_host)"
+            except Exception:
+                pass
+
+        # Strip control characters from notes
+        clean_notes = re.sub(r"[\r\n\t\x00-\x1f]", " ", inc.analyst_notes).strip()
+
+        sanitized.append({
+            "incident_id": inc.incident_id,
+            "created_at": inc.created_at,
+            "last_seen": inc.last_seen,
+            "src_ip": src_ip,
+            "dst_ip": inc.dst_ip,
+            "dst_port": inc.dst_port,
+            "proto": inc.proto.upper(),
+            "severity": inc.severity,
+            "detection_source": inc.detection_source,
+            "raw_score": inc.raw_score,
+            "status": inc.status,
+            "response_action": inc.response_action,
+            "occurrences": inc.occurrence_count,
+            "is_synthetic_fixture": inc.is_synthetic,
+            "analyst_notes": clean_notes,
+        })
+    return sanitized

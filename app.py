@@ -39,12 +39,21 @@ from xshield.monitoring.capture import (
     get_available_interfaces,
 )
 from xshield.pipeline import MODELS_DIR, XShieldModel, load_model, run_experiment
+from xshield.monitoring.runtime import (
+    MonitoringRuntime,
+    get_monitoring_runtime,
+)
 from xshield.response.blocker import (
     BlockActionStatus,
     NetworkResponseManager,
+    PROTECTED_IPS,
     is_protected_ip,
 )
-from xshield.storage.incident_store import IncidentRecord, IncidentStore
+from xshield.storage.incident_store import (
+    IncidentRecord,
+    IncidentStore,
+    sanitize_incident_export,
+)
 from xshield.triage import (
     assess_dataset_compatibility,
     check_model_compatibility,
@@ -132,31 +141,18 @@ st.markdown("""
 
 
 # -----------------------------------------------------------------------------
-# Session State Initialization (Persistent across reruns)
+# Runtime Service & State Initialization (Thread-safe across reruns and workers)
 # -----------------------------------------------------------------------------
-if "incident_store" not in st.session_state:
-    st.session_state.incident_store = IncidentStore()
+runtime = get_monitoring_runtime()
 
-if "alert_manager" not in st.session_state:
-    st.session_state.alert_manager = AlertManager(
-        incident_store=st.session_state.incident_store,
-        cooldown_seconds=60.0,
-    )
-
-if "response_manager" not in st.session_state:
-    st.session_state.response_manager = NetworkResponseManager(simulation_mode=True)
-
-if "detection_engine" not in st.session_state:
-    st.session_state.detection_engine = DetectionEngine()
+st.session_state.runtime = runtime
+st.session_state.incident_store = runtime.incident_store
+st.session_state.alert_manager = runtime.alert_manager
+st.session_state.response_manager = runtime.response_manager
+st.session_state.detection_engine = runtime.detection_engine
 
 if "flow_aggregator" not in st.session_state:
     st.session_state.flow_aggregator = FlowAggregator()
-
-if "live_flows_buffer" not in st.session_state:
-    st.session_state.live_flows_buffer = deque(maxlen=60)
-
-if "replay_engine" not in st.session_state:
-    st.session_state.replay_engine = None
 
 if "selected_incident_id" not in st.session_state:
     st.session_state.selected_incident_id = None
@@ -164,28 +160,10 @@ if "selected_incident_id" not in st.session_state:
 if "quick_block_target" not in st.session_state:
     st.session_state.quick_block_target = ""
 
-if "flow_stats_counters" not in st.session_state:
-    st.session_state.flow_stats_counters = {
-        "total": 0,
-        "suspicious": 0,
-        "benign": 0,
-        "insufficient": 0,
-    }
 
-
-def handle_incoming_flow(flow: FlowRecord) -> None:
-    """Processes a newly captured or replayed flow through detection and alerting."""
-    verdict = st.session_state.detection_engine.evaluate_flow(flow)
-    st.session_state.live_flows_buffer.appendleft({"flow": flow, "verdict": verdict})
-
-    st.session_state.flow_stats_counters["total"] += 1
-    if verdict.status == "SUSPICIOUS":
-        st.session_state.flow_stats_counters["suspicious"] += 1
-        st.session_state.alert_manager.process_verdict(flow, verdict)
-    elif verdict.status == "BENIGN":
-        st.session_state.flow_stats_counters["benign"] += 1
-    else:
-        st.session_state.flow_stats_counters["insufficient"] += 1
+def handle_incoming_flow(flow: FlowRecord) -> DetectionVerdict:
+    """Processes a newly captured or replayed flow safely through MonitoringRuntime."""
+    return runtime.handle_flow(flow)
 
 
 # -----------------------------------------------------------------------------
@@ -198,7 +176,7 @@ with col_h1:
 with col_h2:
     st.markdown(
         "<div style='text-align: right; padding-top: 15px; color: #64748b; font-size: 0.8rem;'>"
-        "XShield v4.0-demo<br>Live Security Demonstration</div>",
+        "XShield v4.1-verified<br>Live Security Demonstration</div>",
         unsafe_allow_html=True,
     )
 
@@ -210,7 +188,7 @@ if not backend_status.is_npcap_installed:
     <div class="status-banner banner-warning">
         <strong>⚠️ CAPTURE DRIVER NOTICE:</strong> Npcap driver not detected on Windows host. 
         Live promiscuous packet sniffing requires Npcap (<a href="https://npcap.com" target="_blank" style="color:#fde68a;">npcap.com</a>) with WinPcap API compatibility. 
-        <strong>Deterministic Replay Engine</strong> is active for safe, full demonstration.
+        <strong>Deterministic Replay Engine</strong> is active for safe, verified demonstration.
     </div>
     """, unsafe_allow_html=True)
 
@@ -243,42 +221,6 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("1 · Network Traffic Monitoring & Real-Time Ingestion")
 
-    m_c1, m_c2, m_c3, m_c4 = st.columns(4)
-    with m_c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Flows Ingested</div>
-            <div class="metric-val">{st.session_state.flow_stats_counters['total']:,}</div>
-            <div class="metric-sub">Session cumulative</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with m_c2:
-        s_count = st.session_state.flow_stats_counters["suspicious"]
-        s_color = "#f43f5e" if s_count > 0 else "#34d399"
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Suspicious Detections</div>
-            <div class="metric-val" style="color: {s_color};">{s_count:,}</div>
-            <div class="metric-sub">Alerted & Triaged</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with m_c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Benign Verified</div>
-            <div class="metric-val" style="color: #34d399;">{st.session_state.flow_stats_counters['benign']:,}</div>
-            <div class="metric-sub">Cleared by Engine</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with m_c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Insufficient Evidence</div>
-            <div class="metric-val" style="color: #94a3b8;">{st.session_state.flow_stats_counters['insufficient']:,}</div>
-            <div class="metric-sub">&lt; 4 pkts / incomplete</div>
-        </div>
-        """, unsafe_allow_html=True)
-
     # Ingestion Controls
     st.markdown("### Stream Controls")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([2, 1, 1])
@@ -301,81 +243,138 @@ with tabs[0]:
     with ctrl_col3:
         st.write("")
         st.write("")
-        btn_cols = st.columns(2)
+        btn_cols = st.columns(3)
         with btn_cols[0]:
             btn_start = st.button("▶ Start Stream", use_container_width=True)
         with btn_cols[1]:
             btn_stop = st.button("⏹ Stop Stream", use_container_width=True)
+        with btn_cols[2]:
+            btn_refresh = st.button("🔄 Refresh View", use_container_width=True)
 
     # Ingestion Engine Actions
     if btn_start:
+        runtime.reset_flow_data()
         if "Synthetic Enterprise Scenario" in source_mode:
-            st.session_state.replay_engine = FlowReplayEngine(
-                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
+            runtime.start_replay(
+                mode="synthetic", delay_seconds=replay_speed, total_flows=120, c2_ratio=0.18
             )
-            st.session_state.replay_engine.start_replay_synthetic(total_flows=120, c2_ratio=0.18)
             st.success("Started Synthetic Enterprise Traffic Replay (C2 Beacons + Benign Browsing).")
         elif "TQH-C2 Sample" in source_mode:
             csv_p = "data/sample_tqh_c2_unlabelled.csv"
-            st.session_state.replay_engine = FlowReplayEngine(
-                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
-            )
-            st.session_state.replay_engine.start_replay_csv(csv_p, max_rows=150)
+            runtime.start_replay(mode="csv", delay_seconds=replay_speed, csv_path=csv_p, max_rows=150)
             st.success(f"Started TQH-C2 Dataset Stream ({csv_p}).")
         elif "CICIDS-2018 Sample" in source_mode:
             csv_p = "data/sample_cicids2018_unlabelled.csv"
-            st.session_state.replay_engine = FlowReplayEngine(
-                flow_callback=handle_incoming_flow, delay_seconds=replay_speed
-            )
-            st.session_state.replay_engine.start_replay_csv(csv_p, max_rows=150)
+            runtime.start_replay(mode="csv", delay_seconds=replay_speed, csv_path=csv_p, max_rows=150)
             st.success(f"Started CICIDS-2018 Dataset Stream ({csv_p}).")
         elif "Live Network Adapter" in source_mode:
             if not backend_status.can_capture_live:
                 st.error("Live sniffing cannot be started because the Npcap driver is missing. Please use Replay Mode.")
             else:
+                runtime.stop_ingestion()
+                worker = LiveCaptureWorker()
+                runtime.capture_worker = worker
+                worker.start()
                 st.info("Live packet capture initialized on default adapter.")
+        st.rerun()
 
     if btn_stop:
-        if st.session_state.replay_engine and st.session_state.replay_engine.is_running:
-            st.session_state.replay_engine.stop()
-            st.warning("Replay stream stopped.")
+        runtime.stop_ingestion()
+        st.warning("Ingestion stream stopped.")
+        st.rerun()
 
-    # Live Flow Stream Table
-    st.markdown("### Real-Time Flow Feed")
-    flow_items = list(st.session_state.live_flows_buffer)
+    if btn_refresh:
+        st.rerun()
 
-    if not flow_items:
-        st.info("No active flows captured yet. Click **▶ Start Stream** above to begin demonstration.")
+    # Active engine status badge
+    is_active = runtime.is_active()
+    if is_active:
+        st.markdown("🟢 **Status:** Ingestion stream actively running in background.")
     else:
-        table_rows = []
-        for item in flow_items[:30]:
-            f: FlowRecord = item["flow"]
-            v: DetectionVerdict = item["verdict"]
+        st.markdown("⚪ **Status:** Ingestion idle. Click **▶ Start Stream** to begin.")
 
-            badge = "🟢 Benign"
-            if v.status == "SUSPICIOUS":
-                badge = f"🔴 Suspicious ({v.risk_tier})"
-            elif v.status == "INSUFFICIENT_EVIDENCE":
-                badge = "⚪ Insufficient"
+    @st.fragment(run_every=1.5 if is_active else None)
+    def render_live_traffic_display():
+        stats = runtime.get_flow_stats()
+        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+        with m_c1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Flows Ingested</div>
+                <div class="metric-val">{stats['total']:,}</div>
+                <div class="metric-sub">Session cumulative</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with m_c2:
+            s_count = stats["suspicious"]
+            s_color = "#f43f5e" if s_count > 0 else "#34d399"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Suspicious Detections</div>
+                <div class="metric-val" style="color: {s_color};">{s_count:,}</div>
+                <div class="metric-sub">Alerted & Triaged</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with m_c3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Benign Verified</div>
+                <div class="metric-val" style="color: #34d399;">{stats['benign']:,}</div>
+                <div class="metric-sub">Cleared by Engine</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with m_c4:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Insufficient Evidence</div>
+                <div class="metric-val" style="color: #94a3b8;">{stats['insufficient']:,}</div>
+                <div class="metric-sub">&lt; 4 pkts / incomplete</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            score_str = f"{v.raw_score:.2f}" if v.raw_score is not None else "N/A"
+        if runtime.last_error:
+            st.warning(f"⚠️ Ingestion Notice: {runtime.last_error}")
 
-            table_rows.append({
-                "Timestamp": datetime.datetime.fromtimestamp(f.last_seen, tz=datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3],
-                "Source": f"{f.src_ip}:{f.src_port}",
-                "Destination": f"{f.dst_ip}:{f.dst_port}",
-                "Proto": f.proto.upper(),
-                "Duration": f"{f.duration:.3f}s",
-                "Pkts (F/R)": f"{f.orig_pkts}/{f.resp_pkts}",
-                "Bytes": f"{f.tot_bytes:,}",
-                "State": f.conn_state,
-                "TLS SNI / JA4": f.sni or (f.ja4[:15] + "..." if f.ja4 else "N/A"),
-                "Verdict": badge,
-                "Score": score_str,
-            })
+        # Live Flow Stream Table
+        st.markdown("### Real-Time Flow Feed")
+        flow_items = runtime.get_recent_flows(limit=30)
 
-        df_display = pd.DataFrame(table_rows)
-        st.dataframe(df_display, use_container_width=True, height=350)
+        if not flow_items:
+            st.info("No active flows in buffer yet. Click **▶ Start Stream** above to begin demonstration.")
+        else:
+            table_rows = []
+            for item in flow_items:
+                f: FlowRecord = item["flow"]
+                v: DetectionVerdict = item["verdict"]
+
+                badge = "🟢 Benign"
+                if v.status == "SUSPICIOUS":
+                    badge = f"🔴 Suspicious ({v.risk_tier})"
+                elif v.status == "INSUFFICIENT_EVIDENCE":
+                    badge = "⚪ Insufficient"
+
+                score_str = f"{v.raw_score:.2f}" if v.raw_score is not None else "N/A"
+                source_tag = "Synthetic" if getattr(f, "is_replayed", False) else "Live"
+
+                table_rows.append({
+                    "Timestamp": datetime.datetime.fromtimestamp(f.last_seen, tz=datetime.timezone.utc).strftime("%H:%M:%S.%f")[:-3],
+                    "Source": f"{f.src_ip}:{f.src_port}",
+                    "Destination": f"{f.dst_ip}:{f.dst_port}",
+                    "Proto": f.proto.upper(),
+                    "Duration": f"{f.duration:.3f}s",
+                    "Pkts (F/R)": f"{f.orig_pkts}/{f.resp_pkts}",
+                    "Bytes": f"{f.tot_bytes:,}",
+                    "State": f.conn_state,
+                    "TLS SNI / JA4": f.sni or (f.ja4[:15] + "..." if f.ja4 else "N/A"),
+                    "Type": source_tag,
+                    "Verdict": badge,
+                    "Score": score_str,
+                })
+
+            df_display = pd.DataFrame(table_rows)
+            st.dataframe(df_display, use_container_width=True, height=350)
+
+    render_live_traffic_display()
 
 
 # =============================================================================
@@ -418,13 +417,14 @@ with tabs[1]:
         # Table of incidents
         inc_rows = []
         for inc in incidents:
+            synth_tag = " [SYNTHETIC]" if getattr(inc, "is_synthetic", False) else ""
             inc_rows.append({
                 "Incident ID": inc.incident_id,
                 "Created (UTC)": inc.created_at[:19],
                 "Target Endpoint": f"{inc.dst_ip}:{inc.dst_port}",
                 "Source Host": inc.src_ip,
                 "Severity": inc.severity,
-                "Detection Source": inc.detection_source,
+                "Detection Source": inc.detection_source + synth_tag,
                 "Occurrences": inc.occurrence_count,
                 "Status": inc.status,
                 "Response": inc.response_action,
@@ -442,7 +442,8 @@ with tabs[1]:
             inv_col1, inv_col2 = st.columns([2, 1])
 
             with inv_col1:
-                st.markdown(f"#### Incident Details: `{selected_inc.incident_id}`")
+                synth_badge = " · <span class='badge-info'>SYNTHETIC FIXTURE</span>" if selected_inc.is_synthetic else ""
+                st.markdown(f"#### Incident Details: `{selected_inc.incident_id}`{synth_badge}", unsafe_allow_html=True)
                 st.markdown(
                     f"**Endpoints:** `{selected_inc.src_ip}:{selected_inc.src_port}` ➔ "
                     f"`{selected_inc.dst_ip}:{selected_inc.dst_port}` ({selected_inc.proto.upper()})"
@@ -506,14 +507,24 @@ with tabs[2]:
         block_reason = st.text_input("Reason / Incident Justification", value="C2 Beaconing Pattern Verified")
         block_dir = st.selectbox("Block Direction", ["outbound", "inbound"], index=0)
 
+        duration_min = st.selectbox(
+            "Temporary Containment Duration",
+            options=[15, 30, 60, 120, 1440],
+            index=2,
+            format_func=lambda m: f"{m} minutes" if m < 60 else f"{m//60} hour(s)",
+        )
+
         # Pre-execution safety check
-        rec = resp_mgr.recommend_block(target_ip_input, block_reason, direction=block_dir)
+        rec = resp_mgr.recommend_block(
+            target_ip_input, block_reason, direction=block_dir, duration_minutes=duration_min
+        )
 
         if not rec.get("allowed"):
             st.error(f"Safety Violation: {rec.get('error')}")
         else:
             st.markdown(f"**Proposed Rule:** `{rec['rule_name']}`")
             st.markdown(f"**Scope:** {rec['scope']}")
+            st.markdown(f"**Duration:** {duration_min} minutes (Expires: `{rec['expires_at'][:19]}`)")
             if rec.get("warning"):
                 st.warning(rec["warning"])
 
@@ -535,6 +546,7 @@ with tabs[2]:
                     target_ip=target_ip_input,
                     reason=block_reason,
                     direction=block_dir,
+                    duration_minutes=duration_min,
                     live_requested=live_opt_in,
                 )
                 if result.status == "SIMULATED":
@@ -549,13 +561,24 @@ with tabs[2]:
         st.markdown("### Active XShield Block Rules & Rollback")
         rules = resp_mgr.list_active_rules()
 
+        if st.button("🧹 Clean Up Expired Rules", use_container_width=True):
+            cleaned = resp_mgr.cleanup_expired_rules()
+            if cleaned:
+                st.success(f"Cleaned up {len(cleaned)} expired rule(s): {', '.join(cleaned)}")
+            else:
+                st.info("No expired rules found.")
+            st.rerun()
+
         if not rules:
             st.info("No active block rules recorded.")
         else:
             for r in rules:
-                with st.expander(f"{'⚡ LIVE' if r.is_live else '🛡️ SIM'} · `{r.target_ip}` ({r.status})", expanded=True):
+                status_icon = "⚡ LIVE" if r.is_live else "🛡️ SIM"
+                with st.expander(f"{status_icon} · `{r.target_ip}` ({r.status})", expanded=True):
                     st.markdown(f"**Rule Name:** `{r.rule_name}`")
                     st.markdown(f"**Status:** `{r.status}` · **Created:** `{r.created_at[:19]}`")
+                    if r.expires_at:
+                        st.markdown(f"**Expires:** `{r.expires_at[:19]}` ({r.duration_minutes}m)")
                     st.markdown(f"**Details:** {r.details}")
 
                     if r.status in ["SIMULATED", "ENFORCED"]:
@@ -620,10 +643,10 @@ with tabs[3]:
 
         st.markdown("---")
         st.markdown("### Export Sanitized Event Log")
-        csv_data = df_all[[
-            "incident_id", "created_at", "last_seen", "src_ip", "dst_ip", "dst_port",
-            "proto", "severity", "detection_source", "raw_score", "status", "response_action"
-        ]].to_csv(index=False)
+
+        anon_toggle = st.checkbox("Anonymize internal RFC 1918 IP addresses in export", value=False)
+        sanitized_rows = sanitize_incident_export(all_incidents, anonymize_internal=anon_toggle)
+        csv_data = pd.DataFrame(sanitized_rows).to_csv(index=False)
 
         st.download_button(
             "📥 Download Sanitized Incident History (CSV)",
@@ -662,10 +685,12 @@ with tabs[4]:
             avail = m_info.get("is_available", False)
             st.markdown(f"- **`{key}`**: `{'🟢 Available' if avail else '🔴 Missing'}` ({len(m_info.get('feature_names', []))} features, Policy: `{m_info.get('port_policy')}`)")
 
+        resp_mgr = runtime.response_manager
         st.markdown("#### Safety & Response Health")
         st.markdown(f"- **Active Response Mode:** `{'SIMULATION ONLY' if resp_mgr.simulation_mode else 'LIVE ENFORCEMENT'}`")
         st.markdown(f"- **Alert Cooldown:** `60 seconds` per endpoint pair")
         st.markdown(f"- **Protected Host Endpoints:** `{len(PROTECTED_IPS)} critical IPs blacklisted from blocking`")
+        st.caption(f"Protected IPs: {', '.join(sorted(PROTECTED_IPS))}")
 
 
 # =============================================================================
@@ -678,7 +703,6 @@ with tabs[5]:
     if not manifest:
         st.error("No models found in models/manifest.json.")
     else:
-        # Re-use Phase 2 offline triage logic
         model_names = list(manifest.keys())
         selected_model_name = st.selectbox("Select Model for CSV Triage", model_names, index=0)
 

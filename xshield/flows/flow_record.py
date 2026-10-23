@@ -47,6 +47,7 @@ class FlowRecord:
     # Incident & triage tracking
     flow_id: str = field(default="")
     is_replayed: bool = False
+    is_synthetic: bool = False
 
     def __post_init__(self) -> None:
         if not self.flow_id:
@@ -105,6 +106,7 @@ class FlowRecord:
             "ja4": self.ja4 or "N/A",
             "ja4s": self.ja4s or "N/A",
             "is_replayed": self.is_replayed,
+            "is_synthetic": self.is_synthetic,
         }
 
     def to_feature_series(self, schema_keys: Optional[list] = None) -> Dict[str, Any]:

@@ -178,6 +178,15 @@ class LiveCaptureWorker:
         if self.is_running:
             return True
 
+        if not check_npcap_installed():
+            self.last_error = (
+                "Npcap driver not detected on Windows host. "
+                "Live packet sniffing requires Npcap (https://npcap.com). Please use Replay Mode."
+            )
+            self.errors_count += 1
+            logger.warning(self.last_error)
+            return False
+
         self._stop_event.clear()
         self.start_time = datetime.datetime.now(datetime.timezone.utc)
         self.packets_captured = 0

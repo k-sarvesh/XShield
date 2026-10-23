@@ -365,8 +365,11 @@ class TestPhase4ResponseManager(unittest.TestCase):
             self.assertTrue(status.is_live)
             self.assertTrue(mock_executor.called)
 
-            # Verify command arguments passed safely as list
-            called_cmd = mock_executor.call_args[0][0]
+            # Verify command arguments passed safely as list across add and verification calls
+            all_called_cmds = [c[0][0] for c in mock_executor.call_args_list]
+            add_cmds = [cmd for cmd in all_called_cmds if "add" in cmd]
+            self.assertTrue(len(add_cmds) > 0, "No 'add' firewall command found in call history.")
+            called_cmd = add_cmds[0]
             self.assertEqual(called_cmd[0], "netsh.exe")
             self.assertIn("action=block", called_cmd)
             self.assertIn("remoteip=198.51.100.55", called_cmd)
@@ -375,7 +378,10 @@ class TestPhase4ResponseManager(unittest.TestCase):
             mock_executor.reset_mock()
             unblocked = mgr.rollback_block(status.rule_name)
             self.assertTrue(unblocked)
-            del_cmd = mock_executor.call_args[0][0]
+            all_del_cmds = [c[0][0] for c in mock_executor.call_args_list]
+            del_cmds = [cmd for cmd in all_del_cmds if "delete" in cmd]
+            self.assertTrue(len(del_cmds) > 0, "No 'delete' firewall command found in call history.")
+            del_cmd = del_cmds[0]
             self.assertEqual(del_cmd[0], "netsh.exe")
             self.assertIn("delete", del_cmd)
 

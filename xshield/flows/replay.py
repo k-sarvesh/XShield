@@ -131,9 +131,11 @@ class FlowReplayEngine:
                         conn_state="RSTO" if random.random() < 0.94 else "SF",
                         history="ShADadFfR",
                         ja4="t13i131000_f57a46bbacb6_e5728521abd4",
+                        ja4s="t130200_1301_a56c5b993250",
                         sni="updates-service-cloud.net",
                         is_closed=True,
                         is_replayed=True,
+                        is_synthetic=True,
                     )
                 else:
                     # Normal benign HTTPS / DNS traffic
@@ -161,9 +163,11 @@ class FlowReplayEngine:
                         conn_state="SF" if not is_udp else "OTH",
                         history="ShADadFf",
                         ja4="t13d151600_8daaf6152771_0271d4a04d2e" if not is_udp else None,
+                        ja4s="t130200_1302_234ea6891581" if not is_udp else None,
                         sni=sni,
                         is_closed=True,
                         is_replayed=True,
+                        is_synthetic=True,
                     )
 
                 self.flows_streamed += 1

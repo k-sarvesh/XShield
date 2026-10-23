@@ -3,7 +3,8 @@
 Enforces:
 - Schema compatibility verification before calling any model.
 - Transparent distinction between uncalibrated ML ensemble vote scores and deterministic indicators.
-- Explicit 'INSUFFICIENT_EVIDENCE' verdicts for incomplete or single-packet flows.
+- Explicit 'INSUFFICIENT_EVIDENCE' verdicts for incomplete flows, missing features, or incompatible schemas.
+- Explicit tagging of synthetic demonstration records (`is_synthetic=True`).
 - Multi-dimensional evidence reporting with confidence and limitation statements.
 - Safe execution in designated 'Experimental Detection / Telemetry Mode'.
 """
@@ -37,6 +38,7 @@ class DetectionVerdict:
     threshold_applied: float
     evidence: List[Dict[str, Any]] = field(default_factory=list)
     limitations: List[str] = field(default_factory=list)
+    is_synthetic: bool = False
     evaluated_at: str = field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
@@ -81,6 +83,14 @@ class DetectionEngine:
         """Evaluates a FlowRecord and produces a comprehensive DetectionVerdict."""
         evidence: List[Dict[str, Any]] = []
         limitations: List[str] = []
+        is_synthetic = bool(getattr(flow, "is_synthetic", False) or getattr(flow, "is_replayed", False))
+
+        if is_synthetic:
+            evidence.append({
+                "indicator": "SYNTHETIC_REPLAY_SOURCE",
+                "description": "Flow originated from synthetic demonstration replay engine.",
+                "confidence": "DEMO_FIXTURE",
+            })
 
         # 1. Gate check: minimum packets required for behavioral modeling
         if flow.tot_pkts < self.policy.min_packets_required:
@@ -98,8 +108,9 @@ class DetectionEngine:
                 detection_source="insufficient_evidence",
                 model_name=self.policy.model_name,
                 threshold_applied=self.policy.threshold,
-                evidence=[],
+                evidence=evidence,
                 limitations=limitations,
+                is_synthetic=is_synthetic,
             )
 
         # 2. Heuristic rules evaluation
@@ -113,7 +124,7 @@ class DetectionEngine:
                         f"Connection to non-standard service port {flow.dst_port} "
                         f"terminated abruptly with client TCP reset ({flow.conn_state})."
                     ),
-                    "confidence": "HIGH",
+                    "confidence": "HEURISTIC (Operational Indicator, Not Proof of Malware)",
                 })
                 heuristic_flagged = True
 
@@ -124,7 +135,7 @@ class DetectionEngine:
                     "description": (
                         f"TLS client fingerprint '{flow.ja4}' matches automated C2 testbed implant profile."
                     ),
-                    "confidence": "MEDIUM (Known Testbed Shortcut)",
+                    "confidence": "HEURISTIC (Known Testbed Implementation Shortcut)",
                 })
                 heuristic_flagged = True
 
@@ -142,27 +153,26 @@ class DetectionEngine:
         # 3. ML Model inference with strict schema verification
         raw_score: Optional[float] = None
         ml_flagged = False
+        schema_incompatible = False
         m_name = self.policy.model_name
         active_model = self._loaded_models.get(m_name)
 
         if active_model:
             req_features = active_model.feature_names
-            # Check if all required features are present
             flow_feats = flow.to_feature_series()
             missing = [f for f in req_features if f not in flow_feats]
 
             if missing:
+                schema_incompatible = True
                 limitations.append(
                     f"Model '{m_name}' requires features {missing[:3]} which are unavailable on this live flow."
                 )
             else:
                 try:
-                    # Construct single-row DataFrame with required schema
                     row_data = {f: [flow_feats[f]] for f in req_features}
                     df_row = pd.DataFrame(row_data)
 
                     probs = active_model.pipeline.predict_proba(df_row)
-                    # Extract probability for malicious / Bot class (index 1)
                     raw_score = float(probs[0, 1])
 
                     if raw_score >= self.policy.threshold:
@@ -194,6 +204,23 @@ class DetectionEngine:
             )
 
         # 4. Synthesize final status and risk tier
+        if schema_incompatible and not heuristic_flagged:
+            # Model could not evaluate and no heuristics triggered -> INSUFFICIENT_EVIDENCE
+            return DetectionVerdict(
+                flow_id=flow.flow_id,
+                status="INSUFFICIENT_EVIDENCE",
+                is_suspicious=False,
+                risk_tier="INFORMATIONAL",
+                raw_score=None,
+                score_label="N/A (Schema Incompatibility)",
+                detection_source="insufficient_evidence",
+                model_name=m_name,
+                threshold_applied=self.policy.threshold,
+                evidence=evidence,
+                limitations=limitations,
+                is_synthetic=is_synthetic,
+            )
+
         if ml_flagged and heuristic_flagged:
             status = "SUSPICIOUS"
             risk_tier = "HIGH"
@@ -225,4 +252,5 @@ class DetectionEngine:
             threshold_applied=self.policy.threshold,
             evidence=evidence,
             limitations=limitations,
+            is_synthetic=is_synthetic,
         )
