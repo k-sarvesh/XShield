@@ -14,10 +14,12 @@ from collections import deque
 import datetime
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from xshield.alerts.alert_manager import AlertManager
 from xshield.detection.engine import DetectionEngine, DetectionVerdict
+from xshield.flows.aggregator import FlowAggregator
 from xshield.flows.flow_record import FlowRecord
 from xshield.flows.replay import FlowReplayEngine
 from xshield.monitoring.capture import LiveCaptureWorker
@@ -129,6 +131,53 @@ class MonitoringRuntime:
                 return engine.start_replay_csv(csv_path=csv_path, max_rows=max_rows)
             else:
                 raise ValueError(f"Unsupported replay mode: {mode}")
+
+    def start_capture(
+        self,
+        interface: Optional[str] = None,
+        bpf_filter: Optional[str] = None,
+    ) -> bool:
+        """Stops any existing worker and starts live promiscuous packet capture on the host network."""
+        with self._lock:
+            self.stop_ingestion()
+
+            aggregator = FlowAggregator(inactivity_timeout=8.0, max_flow_duration=30.0)
+
+            def _packet_callback(pkt: Any) -> None:
+                completed = aggregator.process_packet(pkt)
+                if completed:
+                    try:
+                        self.handle_flow(completed)
+                    except Exception as e:
+                        logger.error(f"Error handling completed live flow: {e}")
+
+            worker = LiveCaptureWorker(
+                interface=interface,
+                bpf_filter=bpf_filter or "ip or ip6",
+                packet_callback=_packet_callback,
+            )
+            self.capture_worker = worker
+            started = worker.start()
+
+            if started:
+                def _flush_thread_loop():
+                    while worker.is_running:
+                        time.sleep(3.0)
+                        expired = aggregator.flush_expired_flows()
+                        for f in expired:
+                            try:
+                                self.handle_flow(f)
+                            except Exception as e:
+                                logger.error(f"Error handling flushed flow: {e}")
+
+                flusher = threading.Thread(
+                    target=_flush_thread_loop,
+                    name="XShield_LiveFlowFlusher",
+                    daemon=True,
+                )
+                flusher.start()
+
+            return started
 
     def stop_ingestion(self) -> None:
         """Safely stops any active replay or capture worker without hanging."""

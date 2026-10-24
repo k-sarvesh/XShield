@@ -1,0 +1,355 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base Resets ── */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-height: 100vh; }
+
+/* ── Light / Dark Mode Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+html.dark ::-webkit-scrollbar-track { background: #0b1220; }
+html.dark ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+html.light ::-webkit-scrollbar-track { background: #f1f5f9; }
+html.light ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* ── Custom Utilities & Design System ── */
+@layer components {
+  /* Cards */
+  .card {
+    @apply rounded-xl transition-colors duration-200 border;
+    background-color: #111c2e;
+    border-color: #1e293b;
+    color: #e2e8f0;
+  }
+  html.light .card {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #0f172a;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.08);
+  }
+
+  .card-header {
+    @apply text-xs font-semibold uppercase tracking-wider mb-1;
+    color: #94a3b8;
+  }
+  html.light .card-header {
+    color: #334155;
+    font-weight: 700;
+  }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .badge-danger {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/25;
+  }
+  html.light .badge-danger {
+    color: #b91c1c;
+    background-color: #fee2e2;
+    border-color: #fca5a5;
+  }
+
+  .badge-warning {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/25;
+  }
+  html.light .badge-warning {
+    color: #b45309;
+    background-color: #fef3c7;
+    border-color: #fcd34d;
+  }
+
+  .badge-success {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25;
+  }
+  html.light .badge-success {
+    color: #047857;
+    background-color: #d1fae5;
+    border-color: #6ee7b7;
+  }
+
+  .badge-neutral {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-slate-500/10 text-slate-700 dark:text-slate-300 border border-slate-500/25;
+  }
+  html.light .badge-neutral {
+    color: #1e293b;
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-medium text-sm
+           transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-cyan-600 hover:bg-cyan-500 text-white focus:ring-cyan-500 shadow-sm shadow-cyan-600/30 font-semibold;
+  }
+  .btn-danger {
+    @apply btn bg-red-600 hover:bg-red-500 text-white focus:ring-red-500 shadow-sm shadow-red-600/30 font-semibold;
+  }
+  .btn-secondary {
+    @apply btn border text-xs py-1.5 px-3 transition-colors font-medium;
+    background-color: #0b1220;
+    border-color: #1e293b;
+    color: #e2e8f0;
+  }
+  .btn-secondary:hover {
+    background-color: #1e293b;
+  }
+  html.light .btn-secondary {
+    background-color: #ffffff;
+    border-color: #94a3b8;
+    color: #0f172a;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  html.light .btn-secondary:hover {
+    background-color: #f1f5f9;
+    color: #020617;
+    border-color: #64748b;
+  }
+
+  /* Form Inputs */
+  .input-field {
+    @apply w-full rounded-lg px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent;
+    background-color: #0b1220;
+    border: 1px solid #1e293b;
+    color: #f1f5f9;
+  }
+  .input-field::placeholder {
+    color: #64748b;
+  }
+  html.light .input-field {
+    background-color: #ffffff;
+    border-color: #94a3b8;
+    color: #020617;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    font-weight: 500;
+  }
+  html.light .input-field::placeholder {
+    color: #64748b;
+  }
+  html.light select.input-field option {
+    background-color: #ffffff;
+    color: #020617;
+  }
+
+  /* Navigation Links */
+  .nav-link {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200;
+  }
+  .nav-link-active {
+    @apply nav-link bg-cyan-500/15 text-cyan-400 font-semibold border-l-2 border-cyan-400;
+  }
+  html.light .nav-link-active {
+    background-color: #e0f2fe;
+    color: #0369a1;
+    font-weight: 700;
+    border-color: #0284c7;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  }
+  .nav-link-inactive {
+    @apply nav-link;
+    color: #94a3b8;
+  }
+  .nav-link-inactive:hover {
+    background-color: #1e293b;
+    color: #f8fafc;
+  }
+  html.light .nav-link-inactive {
+    color: #1e293b;
+    font-weight: 600;
+  }
+  html.light .nav-link-inactive:hover {
+    background-color: #f1f5f9;
+    color: #020617;
+  }
+
+  /* Banners */
+  .banner-warning {
+    @apply rounded-lg p-3.5 text-xs leading-relaxed border-l-4 bg-amber-500/10 border-amber-500 text-amber-800 dark:text-amber-200;
+  }
+  html.light .banner-warning {
+    background-color: #fffbeb;
+    border-color: #d97706;
+    color: #92400e;
+  }
+  .banner-simulation {
+    @apply rounded-lg p-3.5 text-xs leading-relaxed border-l-4 bg-cyan-500/10 border-cyan-500 text-cyan-800 dark:text-cyan-200;
+  }
+  html.light .banner-simulation {
+    background-color: #ecfeff;
+    border-color: #0891b2;
+    color: #155e75;
+  }
+  .banner-danger {
+    @apply rounded-lg p-3.5 text-xs leading-relaxed border-l-4 bg-red-500/10 border-red-500 text-red-800 dark:text-red-200;
+  }
+  html.light .banner-danger {
+    background-color: #fef2f2;
+    border-color: #dc2626;
+    color: #991b1b;
+  }
+  .banner-success {
+    @apply rounded-lg p-3.5 text-xs leading-relaxed border-l-4 bg-emerald-500/10 border-emerald-500 text-emerald-800 dark:text-emerald-200;
+  }
+  html.light .banner-success {
+    background-color: #f0fdf4;
+    border-color: #16a34a;
+    color: #166534;
+  }
+
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+}
+
+/* ── Light Mode Universal Surface Overrides ── */
+html.light body {
+  background-color: #f8fafc;
+  color: #0f172a;
+}
+html.dark body {
+  background-color: #0b1220;
+  color: #f8fafc;
+}
+
+html.light .bg-navy-900 {
+  background-color: #f8fafc !important;
+}
+html.light .bg-navy-900\/90,
+html.light .bg-navy-900\/80,
+html.light .bg-navy-900\/70,
+html.light .bg-navy-900\/60 {
+  background-color: rgba(248, 250, 252, 0.98) !important;
+}
+html.light .bg-navy-800 {
+  background-color: #ffffff !important;
+}
+html.light .bg-navy-800\/90,
+html.light .bg-navy-800\/80 {
+  background-color: rgba(255, 255, 255, 0.98) !important;
+}
+html.light .bg-navy-700 {
+  background-color: #f1f5f9 !important;
+}
+html.light .border-navy-600,
+html.light .border-navy-700,
+html.light .border-navy-800 {
+  border-color: #cbd5e1 !important;
+}
+html.light .divide-navy-700\/50 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #e2e8f0 !important;
+}
+
+/* ── High-Contrast Darker Typography in Light Mode ── */
+html.light h1,
+html.light h2,
+html.light h3,
+html.light h4 {
+  color: #020617 !important;
+  font-weight: 700 !important;
+}
+
+html.light label {
+  color: #0f172a !important;
+  font-weight: 600 !important;
+}
+
+/* Override washed-out slate text utility classes with dark, rich, legible shades in Light Mode */
+html.light .text-slate-200 {
+  color: #020617 !important;
+  font-weight: 500;
+}
+html.light .text-slate-300 {
+  color: #0f172a !important;
+  font-weight: 500;
+}
+html.light .text-slate-400 {
+  color: #1e293b !important;
+}
+html.light .text-slate-500 {
+  color: #334155 !important;
+}
+html.light .text-slate-600 {
+  color: #475569 !important;
+}
+
+/* Monospace text in Light Mode: IPs, ports, IDs, timestamps */
+html.light .font-mono {
+  color: #0f172a;
+}
+html.light .font-mono.text-slate-400,
+html.light .font-mono.text-slate-300,
+html.light .font-mono.text-slate-200 {
+  color: #0f172a !important;
+  font-weight: 500;
+}
+
+/* Table Headers and Cells in Light Mode */
+html.light table thead tr {
+  background-color: #f1f5f9 !important;
+  border-bottom: 2px solid #cbd5e1 !important;
+}
+html.light table th {
+  background-color: #f1f5f9 !important;
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+html.light table tbody tr {
+  border-bottom-color: #e2e8f0 !important;
+}
+html.light table tbody td {
+  color: #0f172a !important;
+}
+
+/* Hover rows in Light Mode */
+html.light tr:hover,
+html.light .hover\:bg-navy-700\/40:hover {
+  background-color: #f1f5f9 !important;
+}
+
+/* Metric KPI card text */
+html.light .card .text-2xl.font-bold {
+  color: #020617 !important;
+}
+
+/* Drawers & Flyouts in Light Mode */
+html.light aside,
+html.light .animate-slide-in {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #0f172a !important;
+}
+
+/* Exempt colored components from text-white override */
+html.light .text-white:not(.btn-primary):not(.btn-primary *):not(.btn-danger):not(.btn-danger *):not(.badge):not(.badge *):not([class*="bg-gradient"]):not([class*="bg-cyan-500"]):not([class*="bg-blue-600"]) {
+  color: #020617 !important;
+}
+
+/* Animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes slide-in {
+  from { transform: translateX(10px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
+}

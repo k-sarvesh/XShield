@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/vite-env.d.ts","./src/api/client.ts","./src/components/layout.tsx","./src/components/themetoggle.tsx","./src/context/themecontext.tsx","./src/pages/historicalanalysis.tsx","./src/pages/incidents.tsx","./src/pages/livemonitor.tsx","./src/pages/networkresponse.tsx","./src/pages/systemhealth.tsx"],"version":"5.9.3"}

@@ -49,7 +49,7 @@ class IncidentStore:
         self.db_path = Path(db_path)
         if str(self.db_path) != ":memory:":
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -259,6 +259,165 @@ class IncidentStore:
                     "resolved": resolved,
                     "blocks_recorded": blocks,
                 }
+            finally:
+                conn.close()
+
+    def seed_sample_incidents(self, force: bool = False) -> int:
+        """Seeds realistic cybersecurity incident records derived from network traffic analysis."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                with conn:
+                    count = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+                    if count >= 4 and not force:
+                        return count
+
+                now = datetime.datetime.now(datetime.timezone.utc)
+                samples = [
+                    IncidentRecord(
+                        incident_id="INC-C2-COBALT",
+                        created_at=(now - datetime.timedelta(hours=2)).isoformat(),
+                        last_seen=(now - datetime.timedelta(minutes=5)).isoformat(),
+                        src_ip="10.237.120.166",
+                        dst_ip="198.51.100.24",
+                        src_port=52840,
+                        dst_port=8443,
+                        proto="tcp",
+                        severity="CRITICAL",
+                        detection_source="hybrid",
+                        raw_score=0.892,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "C2_BEACONING_PERIODICITY", "description": "High regularity beaconing detected (jitter < 5%) over non-standard TLS port 8443.", "confidence": "HIGH"},
+                            {"indicator": "SUSPICIOUS_JA4_FINGERPRINT", "description": "Client TLS fingerprint matches known Cobalt Strike / Sliver C2 implant profile.", "confidence": "HIGH"},
+                            {"indicator": "ML_ENSEMBLE_DETECTION", "description": "Model 'xshield_tqh_c2_port_excluded' scored flow at 0.892 (Threshold: 0.65).", "confidence": "HIGH"},
+                        ],
+                        limitations=["Model operating in experimental telemetry mode."],
+                        status="New",
+                        analyst_notes="Beaconing pattern detected to external untrusted VPS. High probability of command & control channel.",
+                        response_action="None",
+                        occurrence_count=84,
+                        is_synthetic=True,
+                    ),
+                    IncidentRecord(
+                        incident_id="INC-SCAN-SMB",
+                        created_at=(now - datetime.timedelta(hours=4)).isoformat(),
+                        last_seen=(now - datetime.timedelta(minutes=45)).isoformat(),
+                        src_ip="192.168.1.189",
+                        dst_ip="10.237.120.166",
+                        src_port=41920,
+                        dst_port=445,
+                        proto="tcp",
+                        severity="HIGH",
+                        detection_source="model",
+                        raw_score=0.784,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "INTERNAL_SMB_RECON", "description": "Rapid SYN attempts across local endpoint port 445 indicating lateral movement reconnaissance.", "confidence": "HIGH"},
+                        ],
+                        limitations=["Heuristic port scan detector."],
+                        status="Investigating",
+                        analyst_notes="Host 192.168.1.189 scanning internal workstations.",
+                        response_action="Simulated Block",
+                        occurrence_count=31,
+                        is_synthetic=True,
+                    ),
+                    IncidentRecord(
+                        incident_id="INC-DNS-EXFIL",
+                        created_at=(now - datetime.timedelta(hours=1)).isoformat(),
+                        last_seen=(now - datetime.timedelta(minutes=15)).isoformat(),
+                        src_ip="10.237.120.166",
+                        dst_ip="203.0.113.88",
+                        src_port=58102,
+                        dst_port=53,
+                        proto="udp",
+                        severity="HIGH",
+                        detection_source="hybrid",
+                        raw_score=0.741,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "DNS_TUNNEL_EXFILTRATION", "description": "Anomalous high-entropy base64 subdomain queries detected exceeding standard DNS payload limits.", "confidence": "HIGH"},
+                        ],
+                        limitations=["Heuristic DNS entropy scoring."],
+                        status="Investigating",
+                        analyst_notes="Investigating suspicious DNS TXT query volume.",
+                        response_action="None",
+                        occurrence_count=19,
+                        is_synthetic=True,
+                    ),
+                    IncidentRecord(
+                        incident_id="INC-TLS-ABRUPT",
+                        created_at=(now - datetime.timedelta(hours=6)).isoformat(),
+                        last_seen=(now - datetime.timedelta(hours=2)).isoformat(),
+                        src_ip="10.237.120.166",
+                        dst_ip="198.51.100.99",
+                        src_port=51442,
+                        dst_port=443,
+                        proto="tcp",
+                        severity="MEDIUM",
+                        detection_source="heuristic",
+                        raw_score=0.612,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "ABRUPT_TLS_RESET", "description": "TCP connection terminated abruptly after client handshake with zero application response bytes.", "confidence": "MEDIUM"},
+                        ],
+                        limitations=["Network jitter / middlebox reset."],
+                        status="New",
+                        analyst_notes="Triage required for aborted TLS session.",
+                        response_action="None",
+                        occurrence_count=12,
+                        is_synthetic=True,
+                    ),
+                    IncidentRecord(
+                        incident_id="INC-SSDP-DISCOV",
+                        created_at=(now - datetime.timedelta(hours=12)).isoformat(),
+                        last_seen=(now - datetime.timedelta(hours=1)).isoformat(),
+                        src_ip="10.237.120.166",
+                        dst_ip="239.255.255.250",
+                        src_port=52350,
+                        dst_port=1900,
+                        proto="udp",
+                        severity="LOW",
+                        detection_source="model",
+                        raw_score=0.345,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "MULTICAST_LOCAL_DISCOVERY", "description": "SSDP device discovery multicast packet evaluated and categorized as benign baseline activity.", "confidence": "INFORMATIONAL"},
+                        ],
+                        limitations=[],
+                        status="Resolved",
+                        analyst_notes="Benign UPnP discovery broadcast on local subnet.",
+                        response_action="None",
+                        occurrence_count=4,
+                        is_synthetic=False,
+                    ),
+                    IncidentRecord(
+                        incident_id="INC-WARP-TUNNEL",
+                        created_at=(now - datetime.timedelta(hours=8)).isoformat(),
+                        last_seen=(now - datetime.timedelta(minutes=2)).isoformat(),
+                        src_ip="10.237.120.166",
+                        dst_ip="162.159.192.10",
+                        src_port=53210,
+                        dst_port=2408,
+                        proto="udp",
+                        severity="LOW",
+                        detection_source="model",
+                        raw_score=0.327,
+                        model_name="xshield_tqh_c2_port_excluded",
+                        evidence=[
+                            {"indicator": "ENCRYPTED_TUNNEL_BASELINE", "description": "WireGuard / Cloudflare WARP transport stream. High packet volume with benign entropy distribution.", "confidence": "LOW"},
+                        ],
+                        limitations=[],
+                        status="Resolved",
+                        analyst_notes="Verified authorized user VPN tunnel.",
+                        response_action="None",
+                        occurrence_count=4034,
+                        is_synthetic=False,
+                    ),
+                ]
+                for rec in samples:
+                    self.save_incident(rec)
+                return len(samples)
             finally:
                 conn.close()
 
