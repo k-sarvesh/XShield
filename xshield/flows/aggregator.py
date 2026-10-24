@@ -324,6 +324,35 @@ class FlowAggregator:
 
         return expired
 
+    def flush_active_or_expired_flows(
+        self, inactivity_timeout: float = 1.5, max_flow_duration: float = 5.0
+    ) -> List[FlowRecord]:
+        """Flushes flows that are inactive for >= 1.5s or duration >= 5s.
+        Also returns active flows with >= 2 packets as snapshots so live monitor updates continuously."""
+        import copy
+        now = time.time()
+        to_emit: List[FlowRecord] = []
+
+        with self._lock:
+            keys_to_remove = []
+            for key, flow in list(self._active_flows.items()):
+                inactive = now - flow.last_seen
+                total_duration = now - flow.start_time
+
+                if flow.is_closed or inactive >= inactivity_timeout or total_duration >= max_flow_duration:
+                    keys_to_remove.append(key)
+                    flow.is_closed = True
+                    to_emit.append(flow)
+                elif flow.tot_pkts >= 2:
+                    to_emit.append(copy.copy(flow))
+
+            for k in keys_to_remove:
+                self._active_flows.pop(k, None)
+
+            self.total_flows_completed += len(keys_to_remove)
+
+        return to_emit
+
     def get_stats(self) -> Dict[str, Any]:
         """Returns statistics on current flow aggregator state."""
         with self._lock:

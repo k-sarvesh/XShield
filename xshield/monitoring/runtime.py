@@ -141,7 +141,7 @@ class MonitoringRuntime:
         with self._lock:
             self.stop_ingestion()
 
-            aggregator = FlowAggregator(inactivity_timeout=8.0, max_flow_duration=30.0)
+            aggregator = FlowAggregator(inactivity_timeout=1.5, max_flow_duration=5.0)
 
             def _packet_callback(pkt: Any) -> None:
                 completed = aggregator.process_packet(pkt)
@@ -162,13 +162,13 @@ class MonitoringRuntime:
             if started:
                 def _flush_thread_loop():
                     while worker.is_running:
-                        time.sleep(3.0)
-                        expired = aggregator.flush_expired_flows()
-                        for f in expired:
+                        time.sleep(1.0)
+                        flows = aggregator.flush_active_or_expired_flows(inactivity_timeout=1.5, max_flow_duration=5.0)
+                        for f in flows:
                             try:
                                 self.handle_flow(f)
                             except Exception as e:
-                                logger.error(f"Error handling flushed flow: {e}")
+                                logger.error(f"Error handling live flow: {e}")
 
                 flusher = threading.Thread(
                     target=_flush_thread_loop,

@@ -52,7 +52,7 @@ class DetectionPolicy:
     min_packets_required: int = 4
     enable_heuristics: bool = True
     experimental_mode: bool = True
-    alert_on_heuristics_alone: bool = False
+    alert_on_heuristics_alone: bool = True
 
 
 class DetectionEngine:
@@ -92,8 +92,89 @@ class DetectionEngine:
                 "confidence": "DEMO_FIXTURE",
             })
 
-        # 1. Gate check: minimum packets required for behavioral modeling
-        if flow.tot_pkts < self.policy.min_packets_required:
+        # 1. Heuristic rules evaluation (evaluated on all flows, including single-packet probes)
+        heuristic_flagged = False
+        heuristic_severity = "MEDIUM"
+
+        if self.policy.enable_heuristics:
+            # Check A: Known Malicious / C2 Service Ports
+            if flow.dst_port in [4444, 1337, 31337, 8443, 6667, 9001, 9050, 23]:
+                evidence.append({
+                    "indicator": "KNOWN_MALICIOUS_C2_PORT",
+                    "description": (
+                        f"Target port {flow.dst_port} matches known C2 framework / backdoor listener profile "
+                        f"(Metasploit, Sliver, Tor, or unauthorized daemon)."
+                    ),
+                    "confidence": "HIGH (Heuristic Threat Port)",
+                })
+                heuristic_flagged = True
+                heuristic_severity = "HIGH"
+
+            # Check B: Reconnaissance / Port Scanning (SYN scan or connection refused)
+            if flow.conn_state in ["S0", "REJ"] or (flow.orig_pkts >= 1 and flow.resp_pkts == 0 and flow.dst_port in [22, 23, 445, 3389, 8080]):
+                evidence.append({
+                    "indicator": "PORT_SCAN_RECON",
+                    "description": (
+                        f"Probing connection attempt to port {flow.dst_port} with no application response "
+                        f"(State: {flow.conn_state}, Orig: {flow.orig_pkts} pkts)."
+                    ),
+                    "confidence": "HIGH (Port Reconnaissance Heuristic)",
+                })
+                heuristic_flagged = True
+                heuristic_severity = "HIGH"
+
+            # Check C: Unusual high-port TLS beaconing with TCP resets
+            if flow.dst_port in [8443, 8080, 4444, 1337] and flow.conn_state in ["RSTO", "RSTR"]:
+                evidence.append({
+                    "indicator": "NON_STANDARD_PORT_RESET",
+                    "description": (
+                        f"Connection to non-standard service port {flow.dst_port} "
+                        f"terminated abruptly with client TCP reset ({flow.conn_state})."
+                    ),
+                    "confidence": "HEURISTIC (Operational Indicator, Not Proof of Malware)",
+                })
+                heuristic_flagged = True
+                heuristic_severity = "HIGH"
+
+            # Check D: Known Go/Sliver testbed TLS client fingerprint
+            if flow.ja4 and any(b in flow.ja4 for b in ["t13i131000", "t12i121000", "f57a46bbacb6"]):
+                evidence.append({
+                    "indicator": "SUSPICIOUS_JA4_FINGERPRINT",
+                    "description": (
+                        f"TLS client fingerprint '{flow.ja4}' matches automated C2 testbed implant profile."
+                    ),
+                    "confidence": "HEURISTIC (Known Testbed Implementation Shortcut)",
+                })
+                heuristic_flagged = True
+                heuristic_severity = "HIGH"
+
+            # Check E: DNS Tunneling Exfiltration
+            if flow.proto == "udp" and flow.dst_port == 53 and (flow.orig_bytes > 1200 or flow.orig_pkts > 20):
+                evidence.append({
+                    "indicator": "DNS_TUNNEL_EXFILTRATION",
+                    "description": (
+                        f"Anomalous DNS volume ({flow.orig_bytes} bytes / {flow.orig_pkts} pkts) "
+                        f"exceeding standard query thresholds."
+                    ),
+                    "confidence": "HIGH (DNS Payload Anomaly)",
+                })
+                heuristic_flagged = True
+                heuristic_severity = "HIGH"
+
+            # Check F: Short duration empty payload beaconing pattern
+            if 0.05 <= flow.duration <= 0.8 and 8 <= flow.orig_pkts <= 20 and 8 <= flow.resp_pkts <= 20:
+                evidence.append({
+                    "indicator": "BEACON_VOLUME_SIGNATURE",
+                    "description": (
+                        f"Bimodal packet count ({flow.orig_pkts} orig / {flow.resp_pkts} resp) "
+                        f"and duration ({flow.duration:.2f}s) aligns with automated C2 poll sequence."
+                    ),
+                    "confidence": "MEDIUM",
+                })
+                heuristic_flagged = True
+
+        # 2. Gate check: minimum packets required for ML behavioral modeling
+        if flow.tot_pkts < self.policy.min_packets_required and not heuristic_flagged:
             limitations.append(
                 f"Flow contains only {flow.tot_pkts} packets (< {self.policy.min_packets_required} min required). "
                 "Behavioral statistics cannot be reliably computed."
@@ -113,43 +194,6 @@ class DetectionEngine:
                 is_synthetic=is_synthetic,
             )
 
-        # 2. Heuristic rules evaluation
-        heuristic_flagged = False
-        if self.policy.enable_heuristics:
-            # Check 1: Unusual high-port TLS beaconing with TCP resets
-            if flow.dst_port in [8443, 8080, 4444, 1337] and flow.conn_state in ["RSTO", "RSTR"]:
-                evidence.append({
-                    "indicator": "NON_STANDARD_PORT_RESET",
-                    "description": (
-                        f"Connection to non-standard service port {flow.dst_port} "
-                        f"terminated abruptly with client TCP reset ({flow.conn_state})."
-                    ),
-                    "confidence": "HEURISTIC (Operational Indicator, Not Proof of Malware)",
-                })
-                heuristic_flagged = True
-
-            # Check 2: Known Go/Sliver testbed TLS client fingerprint
-            if flow.ja4 and "t13i131000_f57a46bbacb6" in flow.ja4:
-                evidence.append({
-                    "indicator": "SUSPICIOUS_JA4_FINGERPRINT",
-                    "description": (
-                        f"TLS client fingerprint '{flow.ja4}' matches automated C2 testbed implant profile."
-                    ),
-                    "confidence": "HEURISTIC (Known Testbed Implementation Shortcut)",
-                })
-                heuristic_flagged = True
-
-            # Check 3: Short duration empty payload beaconing pattern
-            if 0.05 <= flow.duration <= 0.8 and 10 <= flow.orig_pkts <= 16 and 10 <= flow.resp_pkts <= 16:
-                evidence.append({
-                    "indicator": "BEACON_VOLUME_SIGNATURE",
-                    "description": (
-                        f"Bimodal packet count ({flow.orig_pkts} orig / {flow.resp_pkts} resp) "
-                        f"and duration ({flow.duration:.2f}s) aligns with automated C2 poll sequence."
-                    ),
-                    "confidence": "MEDIUM",
-                })
-
         # 3. ML Model inference with strict schema verification
         raw_score: Optional[float] = None
         ml_flagged = False
@@ -157,7 +201,7 @@ class DetectionEngine:
         m_name = self.policy.model_name
         active_model = self._loaded_models.get(m_name)
 
-        if active_model:
+        if active_model and flow.tot_pkts >= self.policy.min_packets_required:
             req_features = active_model.feature_names
             flow_feats = flow.to_feature_series()
             missing = [f for f in req_features if f not in flow_feats]
@@ -231,7 +275,7 @@ class DetectionEngine:
             detection_source = "ml_model"
         elif heuristic_flagged and self.policy.alert_on_heuristics_alone:
             status = "SUSPICIOUS"
-            risk_tier = "MEDIUM"
+            risk_tier = heuristic_severity
             detection_source = "heuristic_indicator"
         else:
             status = "BENIGN"

@@ -196,6 +196,10 @@ export const api = {
     request<{ success: boolean; flow_id: string; threat_type: string; verdict: any }>(`/traffic/simulate-incident?threat_type=${threatType}`, { method: 'POST' }),
   seedIncidents: (force = false) =>
     request<{ success: boolean; count: number }>(`/incidents/seed-sample?force=${force}`, { method: 'POST' }),
+  getDetectionPolicy: () =>
+    request<{ model_name: string; threshold: number; min_packets_required: number; enable_heuristics: boolean; alert_on_heuristics_alone: boolean }>('/detection/policy'),
+  updateDetectionPolicy: (body: { threshold?: number; enable_heuristics?: boolean; alert_on_heuristics_alone?: boolean }) =>
+    request<{ success: boolean; threshold: number; enable_heuristics: boolean; alert_on_heuristics_alone: boolean }>('/detection/policy', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 export interface TrafficAnalytics {

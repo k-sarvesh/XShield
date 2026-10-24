@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Play, Square, AlertOctagon, ShieldCheck, HelpCircle,
   Activity, Sliders, RefreshCw, ChevronRight, X, ExternalLink,
-  ShieldAlert, Info, Database, Zap, Radio, Wifi, Network
+  ShieldAlert, Info, Database, Zap, Radio, Wifi, Network, ArrowRight
 } from 'lucide-react'
 import { api, FlowItem } from '../api/client'
 import { useNavigate } from 'react-router-dom'
@@ -16,6 +16,7 @@ export default function LiveMonitor() {
   const [trafficMode, setTrafficMode] = useState<'live' | 'synthetic' | 'dataset'>('live')
   const [selectedInterface, setSelectedInterface] = useState<string>('Wi-Fi')
   const [bpfFilter, setBpfFilter] = useState<string>('ip or ip6')
+  const [sensitivity, setSensitivity] = useState<number>(0.65)
   const [delaySeconds, setDelaySeconds] = useState<number>(0.4)
   const [totalFlows, setTotalFlows] = useState<number>(100)
   const [c2Ratio, setC2Ratio] = useState<number>(0.35)
@@ -98,6 +99,30 @@ export default function LiveMonitor() {
     },
     onError: (err: Error) => {
       setActionError(err.message)
+    },
+  })
+
+  // Live Threat Injection & Alert Test Mutation
+  const simulateLiveThreatMutation = useMutation({
+    mutationFn: (threatType: string) => api.simulateThreat(threatType),
+    onSuccess: (data) => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['monitorStats'] })
+      queryClient.invalidateQueries({ queryKey: ['flows'] })
+      queryClient.invalidateQueries({ queryKey: ['monitorStatus'] })
+    },
+    onError: (err: Error) => {
+      setActionError(`Simulation failed: ${err.message}`)
+    },
+  })
+
+  // Update detection sensitivity policy
+  const updatePolicyMutation = useMutation({
+    mutationFn: (threshold: number) => api.updateDetectionPolicy({ threshold }),
+    onSuccess: (data) => {
+      setSensitivity(data.threshold)
+      queryClient.invalidateQueries({ queryKey: ['flows'] })
+      queryClient.invalidateQueries({ queryKey: ['monitorStats'] })
     },
   })
 
@@ -221,6 +246,35 @@ export default function LiveMonitor() {
         </div>
       )}
 
+      {/* ── Active Threat Alert Banner ── */}
+      {stats.suspicious > 0 && (
+        <div className="bg-red-950/40 border-2 border-red-500 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-red-500/10 animate-pulse">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-red-500/20 text-red-400">
+              <AlertOctagon className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-red-300 flex items-center gap-2">
+                <span>Active Threat Traffic Identified</span>
+                <span className="px-2 py-0.5 rounded-full text-xs font-mono font-bold bg-red-500 text-white">
+                  {stats.suspicious} {stats.suspicious === 1 ? 'Threat' : 'Threats'} Detected
+                </span>
+              </h3>
+              <p className="text-xs text-red-200/80 mt-0.5">
+                Heuristic detectors and ML models have flagged high-risk indicators in network traffic.
+              </p>
+            </div>
+          </div>
+          <a
+            href="/incidents"
+            className="btn-danger py-1.5 px-3 text-xs font-bold flex items-center gap-1.5 self-start sm:self-auto"
+          >
+            <span>View Alerts & Dossier</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </a>
+        </div>
+      )}
+
       {/* ── KPI Metric Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="card p-4 border-l-4 border-l-cyan-500">
@@ -337,7 +391,7 @@ export default function LiveMonitor() {
         {/* Live Network Adapter Selector (when in Live mode) */}
         {trafficMode === 'live' ? (
           <div className="p-3 bg-navy-900/60 rounded-lg border border-navy-700/60 space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Capture Network Adapter</label>
                 <select
@@ -366,13 +420,53 @@ export default function LiveMonitor() {
                   className="input-field text-xs font-mono"
                 />
               </div>
+
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">Alert Sensitivity</label>
+                <select
+                  value={sensitivity}
+                  onChange={(e) => updatePolicyMutation.mutate(parseFloat(e.target.value))}
+                  className="input-field text-xs bg-navy-900 cursor-pointer"
+                >
+                  <option value="0.65">Standard (Threshold: 0.65)</option>
+                  <option value="0.45">Strict / Sensitive (Threshold: 0.45)</option>
+                  <option value="0.25">Deep Scan / Paranoid (Threshold: 0.25)</option>
+                </select>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 text-[11px] text-emerald-400 bg-emerald-950/20 border border-emerald-500/20 p-2 rounded">
-              <Network className="w-4 h-4 flex-shrink-0" />
-              <span>
-                <strong>Live Sniffing Ready:</strong> Raw network packets flowing through your adapter are reconstructed into bidirectional TCP/UDP flow records, client TLS fingerprints (JA4) are extracted, and every session is evaluated by the live ML model.
-              </span>
+            {/* Test Alert Injection Bar */}
+            <div className="pt-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-t border-navy-700/40">
+              <div className="flex items-center gap-2 text-[11px] text-emerald-400">
+                <Network className="w-4 h-4 flex-shrink-0" />
+                <span>
+                  <strong>Real-Time Sniffing Active:</strong> Packets are evaluated every 1s. Ongoing host flows appear live in the feed below.
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                <span className="text-[11px] text-slate-400 font-medium">Test Live Alert:</span>
+                <button
+                  type="button"
+                  onClick={() => simulateLiveThreatMutation.mutate('c2_beacon')}
+                  disabled={simulateLiveThreatMutation.isPending}
+                  className="px-2 py-1 text-[11px] font-bold rounded bg-red-500/20 text-red-300 border border-red-500/40 hover:bg-red-500/30 transition flex items-center gap-1"
+                  title="Inject live C2 beacon on port 8443 to test alert detection"
+                >
+                  <Zap className="w-3 h-3 text-red-400" />
+                  <span>Test C2 Alert</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => simulateLiveThreatMutation.mutate('port_scan')}
+                  disabled={simulateLiveThreatMutation.isPending}
+                  className="px-2 py-1 text-[11px] font-bold rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 transition flex items-center gap-1"
+                  title="Inject port reconnaissance probe on port 445"
+                >
+                  <ShieldAlert className="w-3 h-3 text-amber-400" />
+                  <span>Test Port Recon</span>
+                </button>
+              </div>
             </div>
           </div>
         ) : (

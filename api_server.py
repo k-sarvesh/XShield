@@ -436,6 +436,44 @@ def simulate_traffic_incident(threat_type: str = Query("c2_beacon")):
     }
 
 
+class DetectionPolicyUpdateRequest(BaseModel):
+    threshold: Optional[float] = Field(None, ge=0.1, le=1.0)
+    enable_heuristics: Optional[bool] = None
+    alert_on_heuristics_alone: Optional[bool] = None
+
+
+@app.get("/api/detection/policy")
+def get_detection_policy():
+    """Current detection policy and threshold."""
+    policy = runtime.detection_engine.policy
+    return {
+        "model_name": policy.model_name,
+        "threshold": policy.threshold,
+        "min_packets_required": policy.min_packets_required,
+        "enable_heuristics": policy.enable_heuristics,
+        "alert_on_heuristics_alone": policy.alert_on_heuristics_alone,
+    }
+
+
+@app.post("/api/detection/policy")
+def update_detection_policy(body: DetectionPolicyUpdateRequest):
+    """Dynamically update detection threshold and heuristic sensitivity."""
+    policy = runtime.detection_engine.policy
+    if body.threshold is not None:
+        policy.threshold = body.threshold
+    if body.enable_heuristics is not None:
+        policy.enable_heuristics = body.enable_heuristics
+    if body.alert_on_heuristics_alone is not None:
+        policy.alert_on_heuristics_alone = body.alert_on_heuristics_alone
+    runtime.detection_engine.set_policy(policy)
+    return {
+        "success": True,
+        "threshold": policy.threshold,
+        "enable_heuristics": policy.enable_heuristics,
+        "alert_on_heuristics_alone": policy.alert_on_heuristics_alone,
+    }
+
+
 @app.get("/api/analytics/traffic")
 def get_traffic_analytics():
     """Aggregated network traffic analysis metrics from evaluated flow buffer."""
